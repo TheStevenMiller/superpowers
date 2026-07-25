@@ -193,10 +193,12 @@ Use the least powerful model that can handle each role to conserve cost and incr
 The final whole-branch review is one of these — dispatch it on the most
 capable available model, not the session default.
 
-**Review tasks**: choose the model with the same judgment, scaled to the
-diff's size, complexity, and risk. A small mechanical diff does not need the
-most capable model; a subtle concurrency change does. Scoped re-reviews of
-small fix diffs take a cheap-to-mid tier.
+**Review tasks**: `fable`, always — a static pin, never scaled down by the
+diff's size or apparent simplicity ([local] Fable review routing; keep the
+pin in step with the `CLAUDE_CODE_SUBAGENT_MODEL` env pin — they move
+together). Scoped re-reviews of fix diffs stay `fable` too: the re-review is
+the gate on the fix, and when implementer lanes run on a different engine,
+cross-model judgment is the point — don't drop the tier for a small diff.
 
 **Fix-loop escalation (rounds 4-5)**: use a model at least one tier above
 the implementer that got stuck.
