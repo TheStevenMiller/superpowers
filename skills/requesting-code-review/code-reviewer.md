@@ -40,6 +40,9 @@ Subagent (general-purpose):
     - Does the implementation match the plan / requirements?
     - Are deviations justified improvements, or problematic departures?
     - Is all planned functionality present?
+    - Is anything implemented that wasn't asked for (scope creep,
+      speculative "nice to haves")?
+    - Does any requirement look implemented but do the wrong thing?
 
     **Code quality:**
     - Clean separation of concerns?
@@ -47,6 +50,36 @@ Subagent (general-purpose):
     - Type safety where applicable?
     - DRY without premature abstraction?
     - Edge cases handled?
+
+    **Standards baseline** — a fixed smell set that applies even where the
+    repo documents nothing. Each match is a labelled judgment call
+    ("possible Feature Envy"), never a hard violation; a documented repo
+    standard overrides the baseline where they conflict; skip anything
+    tooling already enforces. Match each against the diff:
+    - Mysterious Name — a name that doesn't reveal what it does or holds →
+      rename; if no honest name comes, the design's murky
+    - Duplicated Code — the same logic shape in more than one hunk or file →
+      extract the shared shape, call it from both
+    - Feature Envy — a method reaching into another object's data more than
+      its own → move the method onto the data it envies
+    - Data Clumps — the same few fields or params keep travelling together →
+      bundle them into one type, pass that
+    - Primitive Obsession — a primitive standing in for a domain concept →
+      give the concept its own small type
+    - Repeated Switches — the same switch/if-cascade on the same type
+      recurring across the change → polymorphism, or one map both sites share
+    - Shotgun Surgery — one logical change forcing scattered edits across
+      many files → gather what changes together into one module
+    - Divergent Change — one module edited for several unrelated reasons →
+      split so each module changes for one reason
+    - Speculative Generality — abstraction, params, or hooks for needs the
+      spec doesn't have → delete; inline back until a real need shows
+    - Message Chains — long a.b().c().d() navigation the caller shouldn't
+      depend on → hide the walk behind one method on the first object
+    - Middle Man — a unit that mostly just delegates onward → cut it, call
+      the real target direct
+    - Refused Bequest — an implementer ignoring or overriding most of what
+      it inherits → drop the inheritance, use composition
 
     **Architecture:**
     - Sound design decisions?
@@ -76,8 +109,17 @@ Subagent (general-purpose):
     so the implementer can confirm whether the deviation was intentional.
     If you find issues with the plan itself rather than the implementation,
     say so.
+    Keep the two axes separate: plan alignment and code quality get their
+    own verdicts in their own sections, never merged or reranked against
+    each other — a clean pass on one axis must not soften findings on the
+    other.
 
     ## Output Format
+
+    ### Plan Alignment
+
+    - ✅ Matches plan | ❌ Deviations found: [what's missing, unrequested
+      (scope creep), or implemented-but-wrong, with file:line references]
 
     ### Strengths
     [What's well done? Be specific.]
@@ -131,11 +173,14 @@ Subagent (general-purpose):
 - `[BASE_SHA]` — starting commit
 - `[HEAD_SHA]` — ending commit
 
-**Reviewer returns:** Strengths, Issues (Critical / Important / Minor), Recommendations, Assessment
+**Reviewer returns:** Plan Alignment verdict, Strengths, Issues (Critical / Important / Minor), Recommendations, Assessment
 
 ## Example Output
 
 ```
+### Plan Alignment
+- ✅ Matches plan — all planned functionality present, no scope creep
+
 ### Strengths
 - Clean database schema with proper migrations (db.ts:15-42)
 - Comprehensive test coverage (18 tests, all edge cases)

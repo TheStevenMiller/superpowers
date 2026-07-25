@@ -10,8 +10,7 @@ that the fix itself broke nothing.
 ```
 Subagent (general-purpose):
   description: "Re-review Task N fix round R"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
-         model silently inherits the session's most expensive one]
+  model: fable
   prompt: |
     You are re-reviewing one task's fix round. A previous review produced
     findings; an implementer has attempted to fix them. Your job is to
@@ -92,8 +91,10 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — REQUIRED: reviewer model per SKILL.md Model Selection; scoped
-  re-reviews of small fix diffs take a cheap-to-mid tier
+- model — pinned `fable` ([local] Fable review routing: the re-review is the
+  gate on the fix diff, and when implementer lanes run on a different engine,
+  cross-model judgment is the point — don't drop the tier for a small diff;
+  keep in step with the `CLAUDE_CODE_SUBAGENT_MODEL` env pin)
 - `[BRIEF_FILE]` — the task brief file (same file the implementer worked from)
 - `[FINDINGS]` — the Critical/Important findings and spec gaps from the
   previous review, copied verbatim, one per bullet

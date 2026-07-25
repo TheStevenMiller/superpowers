@@ -10,8 +10,7 @@ more, nothing less) and is well-built (clean, tested, maintainable)
 ```
 Subagent (general-purpose):
   description: "Review Task N (spec + quality)"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
-         model silently inherits the session's most expensive one]
+  model: fable
   prompt: |
     You are reviewing one task's implementation: first whether it matches its
     requirements, then whether it is well-built. This is a task-scoped gate,
@@ -110,6 +109,36 @@ Subagent (general-purpose):
       significantly grow existing files? (Don't flag pre-existing file
       sizes — focus on what this change contributed.)
 
+    **Standards baseline** — a fixed smell set that applies even where the
+    repo documents nothing. Each match is a labelled judgment call
+    ("possible Feature Envy"), never a hard violation; a documented repo
+    standard overrides the baseline where they conflict; skip anything
+    tooling already enforces. Match each against the diff:
+    - Mysterious Name — a name that doesn't reveal what it does or holds →
+      rename; if no honest name comes, the design's murky
+    - Duplicated Code — the same logic shape in more than one hunk or file →
+      extract the shared shape, call it from both
+    - Feature Envy — a method reaching into another object's data more than
+      its own → move the method onto the data it envies
+    - Data Clumps — the same few fields or params keep travelling together →
+      bundle them into one type, pass that
+    - Primitive Obsession — a primitive standing in for a domain concept →
+      give the concept its own small type
+    - Repeated Switches — the same switch/if-cascade on the same type
+      recurring across the change → polymorphism, or one map both sites share
+    - Shotgun Surgery — one logical change forcing scattered edits across
+      many files → gather what changes together into one module
+    - Divergent Change — one module edited for several unrelated reasons →
+      split so each module changes for one reason
+    - Speculative Generality — abstraction, params, or hooks for needs the
+      spec doesn't have → delete; inline back until a real need shows
+    - Message Chains — long a.b().c().d() navigation the caller shouldn't
+      depend on → hide the walk behind one method on the first object
+    - Middle Man — a unit that mostly just delegates onward → cut it, call
+      the real target direct
+    - Refused Bequest — an implementer ignoring or overriding most of what
+      it inherits → drop the inheritance, use composition
+
     Your report should point at evidence: file:line references for every
     finding and for any check you would otherwise answer with a bare
     "yes." A tight report that cites lines gives the controller everything
@@ -135,6 +164,10 @@ Subagent (general-purpose):
     human decides.
     Acknowledge what was done well before listing issues — accurate praise
     helps the implementer trust the rest of the feedback.
+    Keep the two axes separate: spec compliance and code quality get their
+    own verdicts in their own sections, never merged or reranked against
+    each other — a clean pass on one axis must not soften findings on the
+    other.
 
     ## Output Format
 
@@ -166,7 +199,9 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- `[MODEL]` — REQUIRED: reviewer model per SKILL.md Model Selection
+- model — pinned `fable` ([local] Fable review routing: review lanes stay on
+  Fable; keep this pin in step with the `CLAUDE_CODE_SUBAGENT_MODEL` env pin —
+  they move together)
 - `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`
   prints the path; same file the implementer worked from)
 - `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from
