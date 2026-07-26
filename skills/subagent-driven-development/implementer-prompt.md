@@ -20,7 +20,10 @@ To dispatch a task:
      `Agent: implementer (GPT 5.6 Sol)`
    - the report file names the test command run and includes its output
    - finish with a clean worktree — everything committed
-3. Run the adapter (a run can exceed ten minutes — use a background-capable
+3. TDD tasks: inline the vendored `../tdd/SKILL.md` into the dispatch
+   prompt (it is small). Design-heavy tasks: include the absolute path to
+   `../codebase-design/SKILL.md` for on-demand reading.
+4. Run the adapter (a run can exceed ten minutes — use a background-capable
    execution path):
 
        scripts/sdd-codex-dispatch --plan PLAN_FILE --task N \
@@ -35,7 +38,7 @@ To dispatch a task:
    never a thread resume. Fix rounds 4-5 and BLOCKED escalation leave this
    lane entirely: dispatch a native implementer via the Agent tool per
    SKILL.md Model Selection.
-4. Act on the printed `SDD-DISPATCH-RESULT` block: its `status:` line is
+5. Act on the printed `SDD-DISPATCH-RESULT` block: its `status:` line is
    the implementer's SDD status for you to route; a non-zero exit is a
    failed lane — treat the task as BLOCKED and generate no review package.
 
@@ -53,13 +56,8 @@ To dispatch a task:
 
     ## Before You Begin
 
-    If you have questions about:
-    - The requirements or acceptance criteria
-    - The approach or implementation strategy
-    - Dependencies or assumptions
-    - Anything unclear in the task description
-
-    **Ask them now.** Raise any concerns before starting work.
+    If anything is unclear — requirements, acceptance criteria, approach,
+    dependencies, assumptions — **ask now**, before starting work.
 
     ## Your Job
 
@@ -73,8 +71,8 @@ To dispatch a task:
 
     Work from: [directory]
 
-    **While you work:** If you encounter something unexpected or unclear, **ask questions**.
-    It's always OK to pause and clarify. Don't guess or make assumptions.
+    **While you work:** if something is unexpected or unclear, pause and
+    ask — never guess.
 
     While iterating, run the focused test for what you're changing; run the
     full suite once before committing, not after every edit.
@@ -106,8 +104,8 @@ To dispatch a task:
 
     ## When You're in Over Your Head
 
-    It is always OK to stop and say "this is too hard for me." Bad work is worse than
-    no work. You will not be penalized for escalating.
+    Stopping to say "this is too hard for me" is always acceptable — bad
+    work is worse than no work, and escalating is never penalized.
 
     **STOP and escalate when:**
     - The task requires architectural decisions with multiple valid approaches
@@ -131,7 +129,6 @@ To dispatch a task:
     - Are there edge cases I didn't handle?
 
     **Quality:**
-    - Is this my best work?
     - Are names clear and accurate (match what things do, not how they work)?
     - Is the code clean and maintainable?
 
@@ -150,12 +147,14 @@ To dispatch a task:
 
     ## After Review Findings
 
-    If the task review finds issues, you will be resumed with the findings.
-    Fix them, re-run the tests that cover the amended code, and append a fix
-    report to your report file: what you changed, the covering tests you
-    ran, the command, and the output. Reviewers will not re-run tests for
-    you — your report is the test evidence. Then reply with the same short
-    status contract as your first report.
+    If the task review finds issues, the findings come back to you — as a
+    resumed turn or as a fresh dispatch pointing at this brief and report
+    file; the report file is the persistent memory either way. Fix them,
+    re-run the tests that cover the amended code, and append a fix report
+    to your report file: what you changed, the covering tests you ran, the
+    command, and the output. Reviewers will not re-run tests for you — your
+    report is the test evidence. Then reply with the same short status
+    contract as your first report.
 
     ## Report Format
 
