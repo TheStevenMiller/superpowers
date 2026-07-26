@@ -1,13 +1,45 @@
-# Implementer Subagent Prompt Template
+# Implementer Dispatch Prompt Template
 
-Use this template when dispatching an implementer subagent.
+Use this template when dispatching an implementer or fix-round lane.
+
+[local] Sol implementer lanes — on the Claude Code harness, implementer
+work runs on GPT-5.6 Sol through `scripts/sdd-codex-dispatch` (repo root),
+never through the Agent tool. On any other harness, dispatch a native
+subagent per `../using-superpowers/references/codex-tools.md` instead,
+choosing its model per SKILL.md Model Selection.
+
+To dispatch a task:
+
+1. Fill in the template below and write it to
+   `<workspace>/task-N-dispatch.md` (`<workspace>` comes from this skill's
+   `scripts/sdd-workspace PLAN_FILE`). The brief stays the single source of
+   requirements — the filled prompt stays thin.
+2. In the Context placeholder, always include the lane contract the
+   dispatch adapter verifies after the run:
+   - every commit carries the exact trailer line
+     `Agent: implementer (GPT 5.6 Sol)`
+   - the report file names the test command run and includes its output
+   - finish with a clean worktree — everything committed
+3. Run the adapter (a run can exceed ten minutes — use a background-capable
+   execution path):
+
+       scripts/sdd-codex-dispatch --plan PLAN_FILE --task N \
+         --worktree ABS_WORKTREE --branch BRANCH \
+         --prompt-file <workspace>/task-N-dispatch.md \
+         --report-file <workspace>/task-N-report.md \
+         --base BASE_SHA --effort medium|high
+
+   Fix rounds 1-3 and the final review's fix wave re-dispatch fresh through
+   the same adapter with `--fix-round R --base FIX_BASE` and a prompt
+   carrying the brief path, the report-file path, and the open findings —
+   never a thread resume. Fix rounds 4-5 and BLOCKED escalation leave this
+   lane entirely: dispatch a native implementer via the Agent tool per
+   SKILL.md Model Selection.
+4. Act on the printed `SDD-DISPATCH-RESULT` block: its `status:` line is
+   the implementer's SDD status for you to route; a non-zero exit is a
+   failed lane — treat the task as BLOCKED and generate no review package.
 
 ```
-Subagent (general-purpose):
-  description: "Implement Task N: [task name]"
-  model: [MODEL — REQUIRED: choose per SKILL.md Model Selection; an omitted
-         model silently inherits the session's most expensive one]
-  prompt: |
     You are implementing Task N: [task name]
 
     ## Task Description

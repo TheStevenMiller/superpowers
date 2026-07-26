@@ -1,0 +1,360 @@
+#!/usr/bin/env bash
+# Dispatch one subagent-driven-development implementer (or fix-round) lane to
+# GPT-5.6 Sol via `codex exec`, with fail-closed preflight and postconditions.
+# [local] fork patch #2 — the dispatch seam the SDD orchestrator uses instead
+# of the Agent tool for implementer lanes.
+#
+# Why an adapter instead of a bare `codex exec` call:
+# - The sandbox needs assembly: workspace-write keeps the worktree contained,
+#   but its hardcoded carve-out leaves `.git` read-only — an implementer that
+#   cannot commit cannot satisfy the SDD contract. The adapter grants exactly
+#   the worktree's own git dirs back via --add-dir (for linked worktrees the
+#   git dir and the common dir differ; both are needed), and enables network
+#   (the native subagent lane this replaces has it).
+# - A finished turn proves nothing. Every dispatch is verified after the
+#   fact: parseable SDD status, clean worktree, real commits for DONE, test
+#   evidence in the report, exact Agent trailer on every commit.
+# - Model and effort are pinned per dispatch — the config default is a
+#   fan-out mode, and silent config inheritance is how the wrong engine
+#   ships. The dispatch row appended to the plan ledger records what ran.
+# - There is no session resume on this lane. Follow-ups (NEEDS_CONTEXT, fix
+#   rounds) are fresh dispatches carrying the brief/report paths — the
+#   report file is the persistent memory, per the SDD skill's own
+#   re-dispatch contract.
+#
+# The orchestrator composes the dispatch prompt (see the SDD skill's
+# implementer-prompt.md), writes it to a file in the plan workspace, and runs
+# this script. A run can take well over ten minutes — dispatch it through a
+# background-capable execution path and act on the printed result block.
+#
+# Usage:
+#   sdd-codex-dispatch --plan PLAN_FILE --task N --worktree DIR --branch NAME \
+#     --prompt-file FILE --report-file FILE --base SHA --effort medium|high \
+#     [--fix-round R] [--timeout-seconds N] [--billing-lane MODE]
+#
+# PLAN_FILE may be absolute or relative to the worktree. BASE is the commit
+# recorded before this dispatch (fix rounds pass FIX_BASE). --billing-lane is
+# the auth_mode value expected in $CODEX_HOME/auth.json (default: chatgpt,
+# the ChatGPT-subscription login; pass the api-key mode's value instead if
+# dispatch should be refused on subscription auth).
+#
+# Output: a final "SDD-DISPATCH-RESULT" block on stdout. Exit 0 means the
+# dispatch completed AND verification passed — the block's `status:` line
+# (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT) is the implementer's
+# status for the orchestrator to route. Non-zero exit means the lane itself
+# failed closed (2 usage/preflight, 3 dispatch/cap, 4 postcondition): treat
+# the task as BLOCKED and generate no review package.
+set -euo pipefail
+
+readonly LANE_MODEL="gpt-5.6-sol"
+readonly EXPECTED_TRAILER="Agent: implementer (GPT 5.6 Sol)"
+readonly MIN_CODEX_CLI_VERSION="0.145.0"
+readonly DEFAULT_BILLING_LANE="chatgpt"
+readonly DEFAULT_TIMEOUT_SECONDS=3600
+readonly WATCHDOG_POLL_SECONDS=5
+
+usage() {
+  sed -n '30,46p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+result_block() { # result_block STATUS extra-lines...
+  local status=$1
+  shift
+  printf 'SDD-DISPATCH-RESULT\n'
+  printf 'status: %s\n' "$status"
+  local line
+  for line in "$@"; do
+    printf '%s\n' "$line"
+  done
+}
+
+fail_preflight() {
+  result_block "BLOCKED" "stage: preflight" "reason: $*"
+  exit 2
+}
+
+fail_dispatch() {
+  result_block "BLOCKED" "stage: dispatch" "reason: $*"
+  exit 3
+}
+
+fail_postcondition() {
+  result_block "BLOCKED" "stage: postcondition" "reason: $*" \
+    "note: task work may exist in the worktree — do not generate a review package; inspect and route as BLOCKED"
+  exit 4
+}
+
+version_at_least() { # version_at_least HAVE WANT — numeric dotted compare
+  local have want
+  IFS='.' read -r -a have <<<"$1"
+  IFS='.' read -r -a want <<<"$2"
+  local i h w
+  for i in 0 1 2; do
+    h=${have[$i]:-0}
+    w=${want[$i]:-0}
+    [ "$h" -gt "$w" ] && return 0
+    [ "$h" -lt "$w" ] && return 1
+  done
+  return 0
+}
+
+file_mtime() { # file_mtime FILE — epoch seconds, BSD or GNU stat
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
+}
+
+parse_status() { # parse_status FILE — last SDD status token in FILE, if any
+  tr -d '*_`' <"$1" \
+    | grep -Eo 'Status:[[:space:]]*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)' \
+    | tail -1 \
+    | sed 's/Status:[[:space:]]*//' || true
+}
+
+# --- argument parsing -------------------------------------------------------
+
+plan=""
+task_number=""
+worktree=""
+branch=""
+prompt_file=""
+report_file=""
+base=""
+effort=""
+fix_round=""
+timeout_seconds=$DEFAULT_TIMEOUT_SECONDS
+billing_lane=$DEFAULT_BILLING_LANE
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --plan) plan=${2-}; shift ;;
+    --task) task_number=${2-}; shift ;;
+    --worktree) worktree=${2-}; shift ;;
+    --branch) branch=${2-}; shift ;;
+    --prompt-file) prompt_file=${2-}; shift ;;
+    --report-file) report_file=${2-}; shift ;;
+    --base) base=${2-}; shift ;;
+    --effort) effort=${2-}; shift ;;
+    --fix-round) fix_round=${2-}; shift ;;
+    --timeout-seconds) timeout_seconds=${2-}; shift ;;
+    --billing-lane) billing_lane=${2-}; shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; fail_preflight "unknown option: $1" ;;
+  esac
+  shift
+done
+
+for required in plan task_number worktree branch prompt_file report_file base effort; do
+  [ -n "${!required}" ] || { usage >&2; fail_preflight "missing --${required//_/-}"; }
+done
+
+case "$effort" in
+  medium | high) ;;
+  *) fail_preflight "--effort must be medium or high (got: $effort); the config default is a fan-out mode, never inherited" ;;
+esac
+
+case "$task_number" in
+  '' | *[!0-9]*) fail_preflight "--task must be a positive integer (got: $task_number)" ;;
+esac
+
+if [ -n "$fix_round" ]; then
+  case "$fix_round" in
+    '' | *[!0-9]*) fail_preflight "--fix-round must be a positive integer (got: $fix_round)" ;;
+  esac
+fi
+
+case "$timeout_seconds" in
+  '' | *[!0-9]*) fail_preflight "--timeout-seconds must be a positive integer (got: $timeout_seconds)" ;;
+esac
+
+round_label="initial"
+[ -n "$fix_round" ] && round_label="fix-$fix_round"
+
+# --- preflight: worktree, branch, base, files -------------------------------
+
+[[ "$worktree" = /* ]] || fail_preflight "--worktree must be an absolute path (got: $worktree)"
+[ -d "$worktree" ] || fail_preflight "worktree does not exist: $worktree"
+
+repo_root=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) \
+  || fail_preflight "not a git worktree: $worktree"
+worktree_real=$(cd "$worktree" && pwd -P)
+[ "$repo_root" = "$worktree_real" ] \
+  || fail_preflight "worktree is not the repository root (got $worktree_real, root is $repo_root)"
+
+current_branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD)
+[ "$current_branch" = "$branch" ] \
+  || fail_preflight "worktree is on branch '$current_branch', expected '$branch'"
+
+git -C "$worktree" cat-file -e "${base}^{commit}" 2>/dev/null \
+  || fail_preflight "--base is not a commit in this worktree: $base"
+
+[ -s "$prompt_file" ] || fail_preflight "prompt file is missing or empty: $prompt_file"
+
+if [ -n "$fix_round" ]; then
+  [ -f "$report_file" ] \
+    || fail_preflight "fix round $fix_round but no existing report to append to: $report_file"
+fi
+
+# The sandbox is workspace-write over the worktree; git metadata must be
+# granted back explicitly or the implementer cannot stage or commit (the
+# sandbox's .git carve-out is hardcoded). Linked worktrees keep HEAD/index
+# in the private git dir and objects/refs in the common dir — add both.
+git_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-dir) \
+  || fail_preflight "could not resolve the worktree's git dir"
+git_common_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir) \
+  || fail_preflight "could not resolve the worktree's git common dir"
+
+# --- preflight: plan workspace + ledger --------------------------------------
+
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+sdd_workspace_script="$script_dir/../skills/subagent-driven-development/scripts/sdd-workspace"
+[ -x "$sdd_workspace_script" ] \
+  || fail_preflight "sdd-workspace helper not found beside this script: $sdd_workspace_script"
+
+workspace=$(cd "$worktree" && "$sdd_workspace_script" "$plan") \
+  || fail_preflight "could not resolve the plan workspace for: $plan"
+ledger="$workspace/progress.md"
+[ -f "$ledger" ] && [ -w "$ledger" ] \
+  || fail_preflight "plan ledger missing or unwritable: $ledger (create it during SDD setup before dispatching)"
+
+# --- preflight: codex CLI + auth lane ----------------------------------------
+
+command -v codex >/dev/null 2>&1 || fail_preflight "codex CLI is not on PATH"
+codex_version=$(codex --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+[ -n "$codex_version" ] || fail_preflight "could not parse 'codex --version' output"
+version_at_least "$codex_version" "$MIN_CODEX_CLI_VERSION" \
+  || fail_preflight "codex CLI $codex_version is older than required $MIN_CODEX_CLI_VERSION"
+
+auth_file="${CODEX_HOME:-$HOME/.codex}/auth.json"
+[ -f "$auth_file" ] || fail_preflight "no auth.json at $auth_file (is codex logged in?)"
+# Extract only auth_mode; never read the rest of the file into the log.
+auth_mode=$(grep -Eo '"auth_mode"[[:space:]]*:[[:space:]]*"[^"]*"' "$auth_file" \
+  | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')
+[ -n "$auth_mode" ] || fail_preflight "auth.json carries no auth_mode: $auth_file"
+[ "$auth_mode" = "$billing_lane" ] \
+  || fail_preflight "auth_mode '$auth_mode' does not match the chosen billing lane '$billing_lane' — fix codex login or pass --billing-lane deliberately"
+
+# --- preflight: one dispatch at a time ---------------------------------------
+
+# SDD lanes are sequential by contract. The lock survives an adapter crash;
+# a lock whose recorded pid is dead is stale and reclaimed.
+lock_dir="$workspace/.sdd-dispatch.lock"
+if mkdir "$lock_dir" 2>/dev/null; then
+  printf '%s\n' "$$" >"$lock_dir/pid"
+else
+  holder_pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+  if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+    fail_preflight "another dispatch (pid $holder_pid) is already running for this plan — SDD lanes are sequential"
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir" || fail_preflight "could not reclaim the stale dispatch lock: $lock_dir"
+  printf '%s\n' "$$" >"$lock_dir/pid"
+fi
+trap 'rm -rf "$lock_dir"' EXIT
+
+# --- dispatch ----------------------------------------------------------------
+
+# The 600s progress-freshness git hook is orchestrator-session tooling; Sol
+# commits through this lane would hard-fail it. The orchestrator preserves
+# progress logging on its side after review.
+export CODEX_PROGRESS_HOOK_ENABLED=false
+
+dispatch_id="sdd-$(date +%s)-$$"
+dispatch_epoch=$(date +%s)
+reply_file="$workspace/task-${task_number}-reply-${round_label}-${dispatch_id}.md"
+exec_log="$workspace/task-${task_number}-exec-${round_label}-${dispatch_id}.log"
+
+printf 'Task %s: dispatched via sdd-codex-dispatch (%s, model %s, effort %s, base %s, round %s, %s)\n' \
+  "$task_number" "$dispatch_id" "$LANE_MODEL" "$effort" \
+  "$(git -C "$worktree" rev-parse --short "$base")" "$round_label" \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ledger"
+
+sandbox_args=(-s workspace-write --add-dir "$git_dir")
+[ "$git_common_dir" != "$git_dir" ] && sandbox_args+=(--add-dir "$git_common_dir")
+
+codex exec \
+  -C "$worktree" \
+  "${sandbox_args[@]}" \
+  -m "$LANE_MODEL" \
+  -c "model_reasoning_effort=\"$effort\"" \
+  -c "sandbox_workspace_write.network_access=true" \
+  --output-last-message "$reply_file" \
+  --color never \
+  - <"$prompt_file" >"$exec_log" 2>&1 &
+codex_pid=$!
+
+deadline=$((dispatch_epoch + timeout_seconds))
+while kill -0 "$codex_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep "$WATCHDOG_POLL_SECONDS"
+done
+
+if kill -0 "$codex_pid" 2>/dev/null; then
+  kill -TERM "$codex_pid" 2>/dev/null || true
+  sleep 5
+  kill -KILL "$codex_pid" 2>/dev/null || true
+  wait "$codex_pid" 2>/dev/null || true
+  fail_dispatch "wall-clock cap of ${timeout_seconds}s exceeded — codex exec killed (log: $exec_log)"
+fi
+
+codex_exit=0
+wait "$codex_pid" || codex_exit=$?
+[ "$codex_exit" -eq 0 ] \
+  || fail_dispatch "codex exec failed with exit $codex_exit (log: $exec_log)"
+
+# --- postconditions (fail closed; a finished turn proves nothing) -------------
+
+[ -s "$reply_file" ] \
+  || fail_postcondition "codex exec finished but wrote no final message (log: $exec_log)"
+
+sdd_status=$(parse_status "$reply_file")
+if [ -z "$sdd_status" ] && [ -f "$report_file" ]; then
+  sdd_status=$(parse_status "$report_file")
+fi
+[ -n "$sdd_status" ] \
+  || fail_postcondition "no parseable SDD Status (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT) in reply or report — reply saved at $reply_file"
+
+dirty=$(git -C "$worktree" status --porcelain)
+[ -z "$dirty" ] \
+  || fail_postcondition "worktree is dirty after status $sdd_status — uncommitted or untracked work left behind:
+$dirty"
+
+commit_range_note="none"
+case "$sdd_status" in
+  DONE | DONE_WITH_CONCERNS)
+    [ -f "$report_file" ] \
+      || fail_postcondition "status $sdd_status but report file was never written: $report_file"
+    report_mtime=$(file_mtime "$report_file")
+    [ "$report_mtime" -ge "$dispatch_epoch" ] \
+      || fail_postcondition "status $sdd_status but report file predates this dispatch: $report_file"
+
+    commit_count=$(git -C "$worktree" rev-list --count "$base..HEAD")
+    [ "$commit_count" -gt 0 ] \
+      || fail_postcondition "status $sdd_status but no commits in $base..HEAD"
+
+    while IFS= read -r sha; do
+      git -C "$worktree" show -s --format=%B "$sha" | grep -qxF "$EXPECTED_TRAILER" \
+        || fail_postcondition "commit $sha is missing the exact trailer '$EXPECTED_TRAILER'"
+    done < <(git -C "$worktree" rev-list "$base..HEAD")
+
+    # Heuristic evidence gate: the report must name a test command and show a
+    # result. The reviewer judges quality; this only refuses evidence-free DONE.
+    grep -Eqi '(pytest|unittest|npm (test|run)|pnpm (test|run)|yarn (test|run)|go test|cargo (test|nextest)|jest|vitest|mocha|rspec|mix test|dotnet test|make (test|check)|tox|bats|\btests?\b)' "$report_file" \
+      || fail_postcondition "status $sdd_status but the report names no test command: $report_file"
+    grep -Eqi '([0-9]+[[:space:]]*/[[:space:]]*[0-9]+|[0-9]+ (passing|passed|pass)|all tests? pass|passing|passed|\bPASS\b|\bok\b|\bgreen\b)' "$report_file" \
+      || fail_postcondition "status $sdd_status but the report shows no test result output: $report_file"
+
+    commit_range_note="$(git -C "$worktree" rev-parse --short "$base")..$(git -C "$worktree" rev-parse --short HEAD) ($commit_count new)"
+    ;;
+  BLOCKED | NEEDS_CONTEXT)
+    # Valid escalations. The specifics live in the reply; the orchestrator
+    # answers and re-dispatches fresh (never a session resume).
+    ;;
+esac
+
+result_block "$sdd_status" \
+  "stage: complete" \
+  "dispatch: $dispatch_id" \
+  "model: $LANE_MODEL" \
+  "effort: $effort" \
+  "round: $round_label" \
+  "reply: $reply_file" \
+  "report: $report_file" \
+  "commits: $commit_range_note"
