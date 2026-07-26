@@ -158,9 +158,18 @@ conflicts that only emerge from implementation.
 
 Use the least powerful model that can handle each role to conserve cost and increase speed.
 
-**Mechanical implementation tasks** (isolated functions, clear specs, 1-2 files): use a fast, cheap model. Most implementation tasks are mechanical when the plan is well-specified.
+**Implementation lanes run on GPT-5.6 Sol** ([local] Sol implementer lanes):
+every implementer dispatch — initial task, fix rounds 1-3, and the final
+review's single fix wave — goes through `scripts/sdd-codex-dispatch`, which
+pins the model to `gpt-5.6-sol`. Your per-dispatch choice is the reasoning
+effort, not the model:
 
-**Integration and judgment tasks** (multi-file coordination, pattern matching, debugging): use a standard model.
+| Lane | Engine | Effort |
+|---|---|---|
+| Implementer — mechanical task (isolated functions, complete spec, 1-2 files) | `gpt-5.6-sol` via adapter | `medium` |
+| Implementer — integration/judgment task (multi-file coordination, debugging) | `gpt-5.6-sol` via adapter | `high` |
+| Fix rounds 1-3 + final-review fix wave (always a fresh re-dispatch) | `gpt-5.6-sol` via adapter | match the task's lane |
+| Fix rounds 4-5 + BLOCKED escalation | native subagent via the Agent tool | most capable available model |
 
 **Architecture and design tasks**: use the most capable available model.
 The final whole-branch review is one of these — dispatch it on the most
@@ -173,25 +182,28 @@ together). Scoped re-reviews of fix diffs stay `fable` too: the re-review is
 the gate on the fix, and when implementer lanes run on a different engine,
 cross-model judgment is the point — don't drop the tier for a small diff.
 
-**Fix-loop escalation (rounds 4-5)**: use a model at least one tier above
-the implementer that got stuck.
+**Fix-loop escalation (rounds 4-5)**: dispatch a fresh NATIVE implementer
+via the Agent tool on the most capable available model ([local] Sol
+implementer lanes — the escalation rung deliberately changes engine; it is
+the same rung BLOCKED re-dispatch uses).
 
 **Always specify the model explicitly when dispatching a subagent.** An
 omitted model inherits your session's model — often the most capable and
 most expensive — which silently defeats this section.
 
 **Turn count beats token price.** Wall-clock and context cost scale with how
-many turns a subagent takes, and the cheapest models routinely take 2-3× the
-turns on multi-step work — costing more overall. Use a mid-tier model as the
-floor for reviewers and for implementers working from prose descriptions.
-When the task's plan text contains the complete code to write, the
-implementation is transcription plus testing: use the cheapest tier for
-that implementer. Single-file mechanical fixes also take the cheapest tier.
+many turns a subagent takes, and low-effort runs routinely take 2-3× the
+turns on multi-step work — costing more overall. On the Sol implementer lane
+that trade lives in the effort flag: when the task's plan text contains the
+complete code to write, the implementation is transcription plus testing —
+`medium` suffices, and single-file mechanical fixes take `medium` too.
+Anything working from prose descriptions or coordinating files takes `high`.
 
 **Task complexity signals (implementation tasks):**
-- Touches 1-2 files with a complete spec → cheap model
-- Touches multiple files with integration concerns → standard model
-- Requires design judgment or broad codebase understanding → most capable model
+- Touches 1-2 files with a complete spec → `--effort medium`
+- Touches multiple files with integration concerns → `--effort high`
+- Requires design judgment or broad codebase understanding → `--effort high`,
+  and expect the escalation rung if it stalls
 
 ## The Task Loop
 
@@ -230,6 +242,13 @@ and fix-round diffs need it.
 - Record the implementer's agent identity from the dispatch result —
   fix-loop rounds 1-3 resume this agent.
 - Never dispatch multiple implementation subagents in parallel (conflicts).
+
+**Dispatch mechanism ([local] Sol implementer lanes):** on the Claude Code
+harness, compose the template below into a prompt file and run
+`scripts/sdd-codex-dispatch` (the template header carries the exact
+contract; runs exceed ten minutes — use a background-capable execution
+path). On any other harness, dispatch a native subagent per
+`../using-superpowers/references/codex-tools.md`.
 
 Template: [implementer-prompt.md](implementer-prompt.md)
 
