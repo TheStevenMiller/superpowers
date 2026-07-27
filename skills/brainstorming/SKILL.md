@@ -93,6 +93,7 @@ digraph brainstorming {
 - For each unit, you should be able to answer: what does it do, how do you use it, and what does it depend on?
 - Can someone understand what a unit does without reading its internals? Can you change the internals without breaking consumers? If not, the boundaries need work.
 - Smaller, well-bounded units are also easier for you to work with - you reason better about code you can hold in context at once, and your edits are more reliable when files are focused. When a file grows large, that's often a signal that it's doing too much.
+- When designing components, read `skills/codebase-design/SKILL.md` (vendored reference) for the deep-module and seam vocabulary — the resulting design should name its modules and their seams.
 
 **Working in existing codebases:**
 
