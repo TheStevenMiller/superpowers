@@ -30,6 +30,7 @@ Before defining tasks, map out which files will be created or modified and what 
 - You reason best about code you can hold in context at once, and your edits are more reliable when files are focused. Prefer smaller, focused files over large ones that do too much.
 - Files that change together should live together. Split by responsibility, not by technical layer.
 - In existing codebases, follow established patterns. If the codebase uses large files, don't unilaterally restructure - but if a file you're modifying has grown unwieldy, including a split in the plan is reasonable.
+- Deep-module check (vocabulary: `skills/codebase-design/SKILL.md`, vendored reference): prefer few deep units — a small interface hiding substantial behavior; flag any unit whose interface is nearly as complex as its implementation.
 
 This structure informs the task decomposition. Each task should produce self-contained changes that make sense independently.
 
@@ -94,6 +95,9 @@ include this section.]
 - Produces: [what later tasks rely on — exact function names, parameter
   and return types. A task's implementer sees only their own task; this
   block is how they learn the names and types neighboring tasks use.]
+- Test seam: [the pre-agreed public interface this task's tests exercise —
+  see `skills/tdd/SKILL.md` (vendored reference); tests live at this seam,
+  never against internals]
 
 - [ ] **Step 1: Write the failing test**
 
