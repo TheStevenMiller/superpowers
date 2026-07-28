@@ -1,0 +1,134 @@
+# Upstream sync automation — PR-based promotion (RESEARCH.md §4, adjudicated
+# findings #5 + #12).
+#
+# INVARIANT: this workflow NEVER pushes refs/heads/main. It builds and
+# verifies a sync/<tag> candidate branch and opens a PR; promotion to main
+# is a human act via scripts/promote-sync.sh (the merge button is
+# deliberately not used — it cannot express "replace main with the
+# candidate", which is what the patch-stack model requires).
+#
+# Job separation (finding #12): build-candidate executes freshly-fetched
+# upstream code (its tests), so it runs unprivileged — no fork-write
+# credentials, no model keys. Only open-pr holds a write token, and it
+# executes nothing from the candidate tree.
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: '17 9 * * 1' # weekly Monday 09:17 UTC; most runs no-op (desired-state trigger)
+  workflow_dispatch: {}
+
+concurrency:
+  group: upstream-sync # weekly + manual runs never overlap; queued, not cancelled
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.candidate.outputs.result }}
+      reason: ${{ steps.candidate.outputs.reason }}
+      tag: ${{ steps.candidate.outputs.tag }}
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false # upstream test code must not see a token
+      - name: Build and verify sync candidate
+        id: candidate
+        run: |
+          scripts/sync-candidate.sh --output-dir "$RUNNER_TEMP/sync"
+          cat "$RUNNER_TEMP/sync/candidate.env" >> "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/sync/candidate.env"
+      - name: Upload candidate artifact
+        if: steps.candidate.outputs.result == 'candidate'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-candidate
+          path: |
+            ${{ runner.temp }}/sync/sync-candidate.bundle
+            ${{ runner.temp }}/sync/candidate-report.md
+          retention-days: 30
+
+  open-pr:
+    needs: build-candidate
+    if: needs.build-candidate.outputs.result == 'candidate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # candidate branch only — see INVARIANT above
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.build-candidate.outputs.tag }}
+      CANDIDATE_SHA: ${{ needs.build-candidate.outputs.candidate_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sync-candidate
+          path: incoming
+      - name: Push candidate branch (never main)
+        run: |
+          set -euo pipefail
+          git bundle verify incoming/sync-candidate.bundle
+          git fetch incoming/sync-candidate.bundle '+refs/heads/_sync-candidate:refs/heads/_incoming'
+          [ "$(git rev-parse refs/heads/_incoming)" = "$CANDIDATE_SHA" ] || {
+            echo "bundle head does not match verified candidate sha" >&2; exit 1; }
+          # force-with-lease needs the remote-tracking ref when the branch exists
+          git fetch origin "+refs/heads/sync/*:refs/remotes/origin/sync/*" || true
+          if git rev-parse --verify --quiet "refs/remotes/origin/sync/$TAG" >/dev/null; then
+            git push --force-with-lease="refs/heads/sync/$TAG" origin "refs/heads/_incoming:refs/heads/sync/$TAG"
+          else
+            git push origin "refs/heads/_incoming:refs/heads/sync/$TAG"
+          fi
+      - name: Open or refresh the sync PR
+        run: |
+          set -euo pipefail
+          existing=$(gh pr list --head "sync/$TAG" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh pr comment "$existing" --body-file incoming/candidate-report.md
+            echo "Refreshed existing sync PR #$existing"
+          else
+            gh pr create --base main --head "sync/$TAG" \
+              --title "sync: upstream $TAG" \
+              --body-file incoming/candidate-report.md
+          fi
+
+  sync-blocked:
+    needs: build-candidate
+    if: always() && (needs.build-candidate.outputs.result == 'blocked' || needs.build-candidate.result == 'failure')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.build-candidate.outputs.tag || 'unknown' }}
+      REASON: ${{ needs.build-candidate.outputs.reason || 'build-candidate job failed before reporting a reason' }}
+    steps:
+      - name: Open or update the sync-blocked issue
+        run: |
+          set -euo pipefail
+          title="sync blocked: $TAG vs [local] stack"
+          body="Automated upstream sync could not produce a promotable candidate.
+
+          **Reason:** $REASON
+
+          **Run:** $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+
+          Resolve locally in the maintainer clone (conflict path: RESEARCH.md §4 —
+          per-patch verdict keep / adapt / retire), then re-run the workflow."
+          existing=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$GITHUB_REPOSITORY" --body "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body "$body"
+          fi
