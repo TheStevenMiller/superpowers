@@ -41,4 +41,15 @@ grep -q 'codex-tools.md' "$sdd/SKILL.md"
 ! grep -q 'sdd-codex-dispatch' "$sdd/task-reviewer-prompt.md"
 ! grep -q 'sdd-codex-dispatch' "$sdd/re-review-prompt.md"
 
+# .git-writability hardening (cheap half): every adapter-side git call routes
+# through the git_safe wrapper — replace refs ignored, fsmonitor/hooks/external
+# diff neutralized — so a Sol-tampered repo config cannot turn verification into
+# code execution or baseline substitution. No bare worktree git call remains.
+grep -q 'git_safe()' scripts/sdd-codex-dispatch
+grep -q 'GIT_NO_REPLACE_OBJECTS=1' scripts/sdd-codex-dispatch
+grep -q 'core.fsmonitor=false' scripts/sdd-codex-dispatch
+grep -q 'core.hooksPath=/dev/null' scripts/sdd-codex-dispatch
+grep -qF 'git_safe -C "$worktree"' scripts/sdd-codex-dispatch
+! grep -qF 'git -C "$worktree"' scripts/sdd-codex-dispatch
+
 echo "patch-2 intent checks: PASS"

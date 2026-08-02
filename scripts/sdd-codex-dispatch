@@ -109,6 +109,28 @@ parse_status() { # parse_status FILE — last SDD status token in FILE, if any
     | sed 's/Status:[[:space:]]*//' || true
 }
 
+# Every adapter-side git call runs on a worktree whose .git the sandboxed
+# implementer can write (workspace-write + --add-dir on the git dir). A
+# tampered repo config would turn the adapter's own verification into an
+# execution or substitution vector, so those calls go through here, never
+# bare git:
+#   GIT_NO_REPLACE_OBJECTS=1  refs/replace/* is ignored, so a recorded base
+#                             SHA cannot be remapped to substituted content.
+#   core.fsmonitor=false      git status never launches a repo-set fsmonitor
+#                             program (it would run unsandboxed, as this user).
+#   core.hooksPath=/dev/null  no repo hook runs from an adapter git call.
+#   diff.external=            no repo-set external diff program runs.
+# This is the cheap half of the .git-writability hardening; the structural
+# half — never grant .git writable, a trusted step makes the commit — lands
+# with the TDD-lane patch.
+git_safe() {
+  GIT_NO_REPLACE_OBJECTS=1 git \
+    -c core.fsmonitor=false \
+    -c core.hooksPath=/dev/null \
+    -c diff.external= \
+    "$@"
+}
+
 # --- argument parsing -------------------------------------------------------
 
 plan=""
@@ -173,17 +195,17 @@ round_label="initial"
 [[ "$worktree" = /* ]] || fail_preflight "--worktree must be an absolute path (got: $worktree)"
 [ -d "$worktree" ] || fail_preflight "worktree does not exist: $worktree"
 
-repo_root=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) \
+repo_root=$(git_safe -C "$worktree" rev-parse --show-toplevel 2>/dev/null) \
   || fail_preflight "not a git worktree: $worktree"
 worktree_real=$(cd "$worktree" && pwd -P)
 [ "$repo_root" = "$worktree_real" ] \
   || fail_preflight "worktree is not the repository root (got $worktree_real, root is $repo_root)"
 
-current_branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD)
+current_branch=$(git_safe -C "$worktree" rev-parse --abbrev-ref HEAD)
 [ "$current_branch" = "$branch" ] \
   || fail_preflight "worktree is on branch '$current_branch', expected '$branch'"
 
-git -C "$worktree" cat-file -e "${base}^{commit}" 2>/dev/null \
+git_safe -C "$worktree" cat-file -e "${base}^{commit}" 2>/dev/null \
   || fail_preflight "--base is not a commit in this worktree: $base"
 
 [ -s "$prompt_file" ] || fail_preflight "prompt file is missing or empty: $prompt_file"
@@ -197,9 +219,9 @@ fi
 # granted back explicitly or the implementer cannot stage or commit (the
 # sandbox's .git carve-out is hardcoded). Linked worktrees keep HEAD/index
 # in the private git dir and objects/refs in the common dir — add both.
-git_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-dir) \
+git_dir=$(git_safe -C "$worktree" rev-parse --path-format=absolute --git-dir) \
   || fail_preflight "could not resolve the worktree's git dir"
-git_common_dir=$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir) \
+git_common_dir=$(git_safe -C "$worktree" rev-parse --path-format=absolute --git-common-dir) \
   || fail_preflight "could not resolve the worktree's git common dir"
 
 # --- preflight: plan workspace + ledger --------------------------------------
@@ -264,7 +286,7 @@ exec_log="$workspace/task-${task_number}-exec-${round_label}-${dispatch_id}.log"
 
 printf 'Task %s: dispatched via sdd-codex-dispatch (%s, model %s, effort %s, base %s, round %s, %s)\n' \
   "$task_number" "$dispatch_id" "$LANE_MODEL" "$effort" \
-  "$(git -C "$worktree" rev-parse --short "$base")" "$round_label" \
+  "$(git_safe -C "$worktree" rev-parse --short "$base")" "$round_label" \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$ledger"
 
 sandbox_args=(-s workspace-write --add-dir "$git_dir")
@@ -311,7 +333,7 @@ fi
 [ -n "$sdd_status" ] \
   || fail_postcondition "no parseable SDD Status (DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT) in reply or report — reply saved at $reply_file"
 
-dirty=$(git -C "$worktree" status --porcelain)
+dirty=$(git_safe -C "$worktree" status --porcelain)
 [ -z "$dirty" ] \
   || fail_postcondition "worktree is dirty after status $sdd_status — uncommitted or untracked work left behind:
 $dirty"
@@ -325,14 +347,14 @@ case "$sdd_status" in
     [ "$report_mtime" -ge "$dispatch_epoch" ] \
       || fail_postcondition "status $sdd_status but report file predates this dispatch: $report_file"
 
-    commit_count=$(git -C "$worktree" rev-list --count "$base..HEAD")
+    commit_count=$(git_safe -C "$worktree" rev-list --count "$base..HEAD")
     [ "$commit_count" -gt 0 ] \
       || fail_postcondition "status $sdd_status but no commits in $base..HEAD"
 
     while IFS= read -r sha; do
-      git -C "$worktree" show -s --format=%B "$sha" | grep -qxF "$EXPECTED_TRAILER" \
+      git_safe -C "$worktree" show -s --format=%B "$sha" | grep -qxF "$EXPECTED_TRAILER" \
         || fail_postcondition "commit $sha is missing the exact trailer '$EXPECTED_TRAILER'"
-    done < <(git -C "$worktree" rev-list "$base..HEAD")
+    done < <(git_safe -C "$worktree" rev-list "$base..HEAD")
 
     # Heuristic evidence gate: the report must name a test command and show a
     # result. The reviewer judges quality; this only refuses evidence-free DONE.
@@ -341,7 +363,7 @@ case "$sdd_status" in
     grep -Eqi '([0-9]+[[:space:]]*/[[:space:]]*[0-9]+|[0-9]+ (passing|passed|pass)|all tests? pass|passing|passed|\bPASS\b|\bok\b|\bgreen\b)' "$report_file" \
       || fail_postcondition "status $sdd_status but the report shows no test result output: $report_file"
 
-    commit_range_note="$(git -C "$worktree" rev-parse --short "$base")..$(git -C "$worktree" rev-parse --short HEAD) ($commit_count new)"
+    commit_range_note="$(git_safe -C "$worktree" rev-parse --short "$base")..$(git_safe -C "$worktree" rev-parse --short HEAD) ($commit_count new)"
     ;;
   BLOCKED | NEEDS_CONTEXT)
     # Valid escalations. The specifics live in the reply; the orchestrator
