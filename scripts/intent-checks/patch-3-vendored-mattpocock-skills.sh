@@ -8,10 +8,10 @@
 # fails after an upstream sync, do not promote — open the sync-blocked issue.
 set -euo pipefail
 
-# The four vendored reference skills exist with their operative surfaces:
+# The five vendored reference skills exist with their operative surfaces:
 # SKILL.md, the Codex surface (agents/openai.yaml), the MIT license copy,
 # and the never-routed flag (reference files reached by explicit pointer)
-for s in codebase-design tdd diagnosing-bugs design-an-interface; do
+for s in codebase-design tdd diagnosing-bugs design-an-interface resolving-merge-conflicts; do
   test -f "skills/$s/SKILL.md"
   test -f "skills/$s/agents/openai.yaml"
   test -f "skills/$s/LICENSE"
@@ -22,6 +22,7 @@ done
 grep -q 'mattpocock/skills @ ed37663' skills/codebase-design/SKILL.md
 grep -q 'mattpocock/skills @ ed37663' skills/tdd/SKILL.md
 grep -q 'mattpocock/skills @ ed37663' skills/diagnosing-bugs/SKILL.md
+grep -q 'mattpocock/skills @ ed37663' skills/resolving-merge-conflicts/SKILL.md
 grep -q 'only maintained copy' skills/design-an-interface/SKILL.md
 
 # Site-1 pointer: brainstorming enters the deep-module/seam vocabulary at
