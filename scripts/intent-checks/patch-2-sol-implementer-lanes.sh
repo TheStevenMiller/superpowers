@@ -30,6 +30,13 @@ grep -q 'sdd-codex-dispatch' "$sdd/implementer-prompt.md"
 ! grep -q 'MODEL — REQUIRED' "$sdd/implementer-prompt.md"
 ! grep -q 'Subagent (general-purpose)' "$sdd/implementer-prompt.md"
 
+# Adapter resolution is plugin-root-derived (TDD-lane review finding #4 /
+# ledger A7 spillover): the absolute-resolution anchor is present; the bare
+# command-position invocation and the false "(repo root)" location are gone
+grep -qF '<plugin-root>/scripts/sdd-codex-dispatch' "$sdd/implementer-prompt.md"
+! grep -qE '^[[:space:]]+scripts/sdd-codex-dispatch' "$sdd/implementer-prompt.md"
+! grep -qF '(repo root)' "$sdd/implementer-prompt.md"
+
 # SKILL.md Model Selection: the Sol lane table is present and the Task Loop
 # dispatch line is harness-conditional (non-Claude harnesses get native
 # subagent dispatch, never a shell-out to a machine-local CLI lane)

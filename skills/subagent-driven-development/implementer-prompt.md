@@ -3,10 +3,14 @@
 Use this template when dispatching an implementer or fix-round lane.
 
 [local] Sol implementer lanes — on the Claude Code harness, implementer
-work runs on GPT-5.6 Sol through `scripts/sdd-codex-dispatch` (repo root),
-never through the Agent tool. On any other harness, dispatch a native
-subagent per `../using-superpowers/references/codex-tools.md` instead,
-choosing its model per SKILL.md Model Selection.
+work runs on GPT-5.6 Sol through the plugin's `scripts/sdd-codex-dispatch`,
+never through the Agent tool. Resolve it absolutely before dispatching:
+`<plugin-root>/scripts/sdd-codex-dispatch`, where `<plugin-root>` is two
+levels up from this skill's announced base directory (the versioned plugin
+cache dir). Never invoke it target-repo-relative — project repos do not
+contain it. On any other harness, dispatch a native subagent per
+`../using-superpowers/references/codex-tools.md` instead, choosing its
+model per SKILL.md Model Selection.
 
 To dispatch a task:
 
@@ -26,7 +30,7 @@ To dispatch a task:
 4. Run the adapter (a run can exceed ten minutes — use a background-capable
    execution path):
 
-       scripts/sdd-codex-dispatch --plan PLAN_FILE --task N \
+       <plugin-root>/scripts/sdd-codex-dispatch --plan PLAN_FILE --task N \
          --worktree ABS_WORKTREE --branch BRANCH \
          --prompt-file <workspace>/task-N-dispatch.md \
          --report-file <workspace>/task-N-report.md \
