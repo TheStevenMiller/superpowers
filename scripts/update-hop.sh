@@ -22,8 +22,16 @@ CACHE_ROOT="$HOME/.claude/plugins/cache/$MARKETPLACE/superpowers"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 
+# Prefer the native CLI: launchd's login shell never reads ~/.zshrc, so bare
+# PATH resolution picks up whatever /opt/homebrew/bin carries — observed
+# 2026-08-05: a Feb-era npm 2.1.56 whose marketplace refresh re-clones
+# SSH-only with no backup/restore. The native CLI probes transport
+# (HTTPS-primary here) and restores the marketplace dir on clone failure.
+PATH="$HOME/.local/bin:$PATH"
+
 command -v claude >/dev/null || { log "ERROR: claude CLI not on PATH"; exit 1; }
 command -v jq >/dev/null || { log "ERROR: jq not on PATH"; exit 1; }
+log "claude binary: $(command -v claude) ($(claude --version 2>/dev/null || echo version-unknown))"
 
 # Rollback state (fork copy uninstalled) makes the hop a deliberate no-op;
 # rollback step 6 unloads the launchd job, but don't spam errors if it ran.
