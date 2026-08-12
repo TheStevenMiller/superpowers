@@ -12,7 +12,8 @@
 # Designed to run unattended (daily launchd job) and to be safe to run
 # any time: desired-state, idempotent, fail-closed. Running Claude
 # sessions are unaffected by an update (version-dir insulated); new
-# sessions pick up the new version.
+# sessions pick up the new version. Network-touching CLI calls get a
+# bounded retry so a transient blip doesn't defer delivery a full day.
 set -euo pipefail
 
 MARKETPLACE="superpowers-dev"
@@ -21,6 +22,31 @@ MARKETPLACE_MANIFEST="$HOME/.claude/plugins/marketplaces/$MARKETPLACE/.claude-pl
 CACHE_ROOT="$HOME/.claude/plugins/cache/$MARKETPLACE/superpowers"
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+
+# Bounded retry for the network-touching CLI calls: a transient GitHub blip
+# should not cost a day of delivery latency (the next launchd fire). The
+# native CLI restores marketplace state on a failed re-clone (see the
+# 2026-08-05 gotcha), so repeating an attempt is safe; exhaustion stays
+# fail-closed — the non-zero return exits the script under set -e.
+RETRY_ATTEMPTS=3
+RETRY_DELAYS=(20 40)  # seconds before attempt 2, attempt 3
+
+retry_cli() {
+  local label="$1"; shift
+  local attempt delay
+  for (( attempt=1; attempt<=RETRY_ATTEMPTS; attempt++ )); do
+    if "$@" >/dev/null; then
+      return 0
+    fi
+    if (( attempt < RETRY_ATTEMPTS )); then
+      delay="${RETRY_DELAYS[attempt-1]}"
+      log "WARN: $label failed (attempt $attempt/$RETRY_ATTEMPTS) — retrying in ${delay}s"
+      sleep "$delay"
+    fi
+  done
+  log "ERROR: $label failed after $RETRY_ATTEMPTS attempts"
+  return 1
+}
 
 # Prefer the native CLI: launchd's login shell never reads ~/.zshrc, so bare
 # PATH resolution picks up whatever /opt/homebrew/bin carries — observed
@@ -41,7 +67,7 @@ if ! claude plugin list 2>/dev/null | grep -q "$PLUGIN"; then
 fi
 
 log "updating marketplace $MARKETPLACE..."
-claude plugin marketplace update "$MARKETPLACE" >/dev/null
+retry_cli "marketplace update" claude plugin marketplace update "$MARKETPLACE"
 
 [[ -f "$MARKETPLACE_MANIFEST" ]] || { log "ERROR: marketplace manifest missing at $MARKETPLACE_MANIFEST"; exit 1; }
 expected=$(jq -r '.plugins[0].version' "$MARKETPLACE_MANIFEST")
@@ -56,7 +82,7 @@ if [[ -f "$CACHE_ROOT/$expected/.claude-plugin/plugin.json" ]]; then
 fi
 
 log "fork release $expected not yet delivered — updating plugin..."
-claude plugin update "$PLUGIN" >/dev/null
+retry_cli "plugin update" claude plugin update "$PLUGIN"
 
 cache_manifest="$CACHE_ROOT/$expected/.claude-plugin/plugin.json"
 [[ -f "$cache_manifest" ]] || { log "ERROR: update ran but cache dir for $expected is missing ($cache_manifest)"; exit 1; }
