@@ -102,11 +102,16 @@ file_mtime() { # file_mtime FILE — epoch seconds, BSD or GNU stat
   stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
 }
 
-parse_status() { # parse_status FILE — last SDD status token in FILE, if any
-  tr -d '*_`' <"$1" \
-    | grep -Eo 'Status:[[:space:]]*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)' \
-    | tail -1 \
-    | sed 's/Status:[[:space:]]*//' || true
+parse_status() { # parse_status FILE — last line-anchored SDD status in FILE, if any
+  # Anchored to whole lines so a status token quoted mid-prose (brief echo,
+  # explanation of the protocol) can never be read as the report's status.
+  # Fix rounds append to one report, so multiple status lines are legitimate
+  # and the LAST one is current (append-aware — TDD-lane ledger A14 rider).
+  # The emphasis-strip must NOT delete underscores: two of the four contract
+  # statuses carry them (DONE_WITH_CONCERNS, NEEDS_CONTEXT).
+  tr -d '*`' <"$1" \
+    | grep -E '^[[:space:]]*Status:[[:space:]]*(DONE_WITH_CONCERNS|DONE|BLOCKED|NEEDS_CONTEXT)[[:space:]]*$' \
+    | awk 'END { if (NR > 0) { sub(/^[[:space:]]*Status:[[:space:]]*/, ""); sub(/[[:space:]]*$/, ""); print } }' || true
 }
 
 # Every adapter-side git call runs on a worktree whose .git the sandboxed
@@ -240,7 +245,9 @@ ledger="$workspace/progress.md"
 # --- preflight: codex CLI + auth lane ----------------------------------------
 
 command -v codex >/dev/null 2>&1 || fail_preflight "codex CLI is not on PATH"
-codex_version=$(codex --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+if ! codex_version=$(codex --version 2>/dev/null | grep -m1 -Eo '[0-9]+\.[0-9]+\.[0-9]+'); then
+  codex_version=""
+fi
 [ -n "$codex_version" ] || fail_preflight "could not parse 'codex --version' output"
 version_at_least "$codex_version" "$MIN_CODEX_CLI_VERSION" \
   || fail_preflight "codex CLI $codex_version is older than required $MIN_CODEX_CLI_VERSION"
@@ -248,8 +255,10 @@ version_at_least "$codex_version" "$MIN_CODEX_CLI_VERSION" \
 auth_file="${CODEX_HOME:-$HOME/.codex}/auth.json"
 [ -f "$auth_file" ] || fail_preflight "no auth.json at $auth_file (is codex logged in?)"
 # Extract only auth_mode; never read the rest of the file into the log.
-auth_mode=$(grep -Eo '"auth_mode"[[:space:]]*:[[:space:]]*"[^"]*"' "$auth_file" \
-  | head -1 | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/')
+if ! auth_mode=$(grep -m1 -Eo '"auth_mode"[[:space:]]*:[[:space:]]*"[^"]*"' "$auth_file" \
+  | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/'); then
+  auth_mode=""
+fi
 [ -n "$auth_mode" ] || fail_preflight "auth.json carries no auth_mode: $auth_file"
 [ "$auth_mode" = "$billing_lane" ] \
   || fail_preflight "auth_mode '$auth_mode' does not match the chosen billing lane '$billing_lane' — fix codex login or pass --billing-lane deliberately"
@@ -292,6 +301,7 @@ printf 'Task %s: dispatched via sdd-codex-dispatch (%s, model %s, effort %s, bas
 sandbox_args=(-s workspace-write --add-dir "$git_dir")
 [ "$git_common_dir" != "$git_dir" ] && sandbox_args+=(--add-dir "$git_common_dir")
 
+set -m
 codex exec \
   -C "$worktree" \
   "${sandbox_args[@]}" \
@@ -302,6 +312,7 @@ codex exec \
   --color never \
   - <"$prompt_file" >"$exec_log" 2>&1 &
 codex_pid=$!
+set +m
 
 deadline=$((dispatch_epoch + timeout_seconds))
 while kill -0 "$codex_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
@@ -309,11 +320,11 @@ while kill -0 "$codex_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
 done
 
 if kill -0 "$codex_pid" 2>/dev/null; then
-  kill -TERM "$codex_pid" 2>/dev/null || true
+  kill -TERM -- "-$codex_pid" 2>/dev/null || true
   sleep 5
-  kill -KILL "$codex_pid" 2>/dev/null || true
+  kill -KILL -- "-$codex_pid" 2>/dev/null || true
   wait "$codex_pid" 2>/dev/null || true
-  fail_dispatch "wall-clock cap of ${timeout_seconds}s exceeded — codex exec killed (log: $exec_log)"
+  fail_dispatch "wall-clock cap of ${timeout_seconds}s exceeded — codex exec process group killed (log: $exec_log)"
 fi
 
 codex_exit=0
