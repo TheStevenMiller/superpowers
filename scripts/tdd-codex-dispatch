@@ -1,0 +1,625 @@
+#!/usr/bin/env bash
+# Dispatch one ad-hoc TDD-lane implementation round to GPT-5.6 Sol via
+# `codex exec`, with fail-closed preflight, survivable dispatch, a TRUSTED
+# COMMIT made by this adapter (Sol never writes git metadata and never
+# commits), and fail-closed postconditions. [local] fork patch #5 — the
+# implement-step seam used by skills/test-driven-development/references/
+# codex-lane.md. Standalone plan-less sibling of sdd-codex-dispatch by
+# design (disjoint patch ownership — F06); deliberate duplication.
+#
+# Exit taxonomy (spec §5, ledger A15/A20):
+#   0  completed — result record persisted (any status, incl. synthesized
+#      CANCELLED/MALFORMED) and printed to stdout
+#   2  preflight failure — diagnostic to stderr, NO result record by design
+#   3  dispatch/timeout/interrupt — atomic CANCELLED record when traps ran;
+#      SIGKILL leaves no record (controller no-record rule: treat as KILLED)
+#   4  postcondition failure — deviation named on stderr, NO record; the
+#      reported status is NOT accepted (A4)
+#
+# Sandbox boundary (#16 structural): workspace-write with no extra dir
+# grants — the sandbox's hardcoded carve-out keeps .git read-only for Sol.
+# Sol edits the worktree and reports; THIS SCRIPT stages and commits.
+#
+# Usage:
+#   tdd-codex-dispatch --worktree DIR --branch NAME --commit-subject SUBJ \
+#     --effort medium|high [--fix-round N] [--billing-lane MODE] \
+#     [--timeout-seconds N] [--protect-path P]... [--protect-glob G]... \
+#     [--format-cmd CMD]...
+#
+# The Sol brief arrives on stdin and is persisted into the lane workspace.
+# Always dispatch through a background-capable execution path (runs exceed
+# 10 minutes; foreground Bash caps at 600s — spec §3 step 5).
+set -euo pipefail
+
+# Bash cannot trap SIGINT when an asynchronous caller passed it in as ignored.
+# Reset it before this interpreter installs the survivability handlers below.
+if [ "${TDD_DISPATCH_SIGNALS_RESET:-}" != "1" ]; then
+  export TDD_DISPATCH_SIGNALS_RESET=1
+  exec perl -e '$SIG{INT} = "DEFAULT"; exec { $ARGV[0] } @ARGV' "$0" "$@"
+fi
+unset TDD_DISPATCH_SIGNALS_RESET
+
+readonly LANE_MODEL="gpt-5.6-sol"
+readonly IMPLEMENTER_TRAILER="Agent: implementer (GPT 5.6 Sol)"
+readonly MIN_CODEX_CLI_VERSION="0.145.0"
+readonly DEFAULT_BILLING_LANE="chatgpt"
+readonly DEFAULT_TIMEOUT_SECONDS=3600
+readonly WATCHDOG_POLL_SECONDS=1
+readonly WORKSPACE_ROOT="${TDD_LANE_WORKSPACE_ROOT:-$HOME/.claude/tdd-lane}"
+
+usage() {
+  sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+diag() { printf 'tdd-codex-dispatch: %s\n' "$*" >&2; }
+
+fail_preflight() { # exit 2 — stderr only; no result record BY DESIGN (A15/A20(3))
+  diag "preflight: $*"
+  exit 2
+}
+
+fail_postcondition() { # exit 4 — deviation named; no record; status not accepted (A4/A5)
+  diag "postcondition: $*"
+  exit 4
+}
+
+version_at_least() { # version_at_least HAVE WANT — numeric dotted compare
+  local have want
+  IFS='.' read -r -a have <<<"$1"
+  IFS='.' read -r -a want <<<"$2"
+  local i h w
+  for i in 0 1 2; do
+    h=${have[$i]:-0}
+    w=${want[$i]:-0}
+    [ "$h" -gt "$w" ] && return 0
+    [ "$h" -lt "$w" ] && return 1
+  done
+  return 0
+}
+
+# Trusted git wrapper (spec §5; A8 + the efc2460 pattern, extended): every
+# adapter git call ignores replace refs, runs no repo-configured executable
+# (fsmonitor, hooks, external diff), and is immune to inherited pathspec-
+# semantics env vars. Never call bare git in this script.
+git_safe() {
+  env -u GIT_LITERAL_PATHSPECS -u GIT_GLOB_PATHSPECS -u GIT_NOGLOB_PATHSPECS \
+    -u GIT_ICASE_PATHSPECS -u GIT_EXTERNAL_DIFF GIT_NO_REPLACE_OBJECTS=1 \
+    git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"
+}
+
+# --- argument parsing ---------------------------------------------------------
+
+worktree=""
+branch=""
+commit_subject=""
+effort=""
+fix_round=""
+billing_lane=$DEFAULT_BILLING_LANE
+timeout_seconds=$DEFAULT_TIMEOUT_SECONDS
+protect_paths=()
+protect_globs=()
+format_cmds=()
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --worktree) worktree=${2-}; shift ;;
+    --branch) branch=${2-}; shift ;;
+    --commit-subject) commit_subject=${2-}; shift ;;
+    --effort) effort=${2-}; shift ;;
+    --fix-round) fix_round=${2-}; shift ;;
+    --billing-lane) billing_lane=${2-}; shift ;;
+    --timeout-seconds) timeout_seconds=${2-}; shift ;;
+    --protect-path) protect_paths+=("${2-}"); shift ;;
+    --protect-glob) protect_globs+=("${2-}"); shift ;;
+    --format-cmd) [ -n "${2-}" ] || fail_preflight "--format-cmd: empty value"; format_cmds+=("$2"); shift ;;
+    -h | --help) usage; exit 0 ;;
+    *) usage >&2; fail_preflight "unknown option: $1" ;;
+  esac
+  shift || fail_preflight "trailing option is missing its value"
+done
+
+for required in worktree branch commit_subject effort; do
+  [ -n "${!required}" ] || { usage >&2; fail_preflight "missing --${required//_/-}"; }
+done
+
+case "$effort" in
+  medium | high) ;;
+  *) fail_preflight "--effort must be medium or high (got: $effort); the config default is a fan-out mode, never inherited" ;;
+esac
+
+if [ -n "$fix_round" ]; then
+  case "$fix_round" in
+    '' | *[!0-9]*) fail_preflight "--fix-round must be a positive integer (got: $fix_round)" ;;
+  esac
+fi
+
+case "$timeout_seconds" in
+  '' | *[!0-9]*) fail_preflight "--timeout-seconds must be a positive integer (got: $timeout_seconds)" ;;
+esac
+
+# Controller-supplied conventional subject, mechanically validated (#17 residue 1)
+printf '%s' "$commit_subject" \
+  | grep -qE '^(feat|fix|docs|test|refactor|chore|style|perf|ci|build)(\([^)]+\))?: .+' \
+  || fail_preflight "--commit-subject is not a conventional subject: $commit_subject"
+
+# Typed, magic-rejecting, union-only protection extensions (A8/A23(4))
+validate_protect_value() { # validate_protect_value KIND VALUE
+  local kind=$1 value=$2
+  [ -n "$value" ] || fail_preflight "--protect-$kind: empty value"
+  case "$value" in
+    :*) fail_preflight "--protect-$kind '$value': pathspec magic rejected — plain relative values only" ;;
+    /*) fail_preflight "--protect-$kind '$value': absolute path rejected" ;;
+  esac
+  case "/$value/" in
+    */../*) fail_preflight "--protect-$kind '$value': parent traversal rejected" ;;
+  esac
+}
+# Length-guarded loops: bash 3.2 + set -u errors on expanding an empty array,
+# and an [@]:- artifact guard would silently swallow user-passed '' values —
+# empty values must reach validate_protect_value and be REJECTED.
+if [ ${#protect_paths[@]} -gt 0 ]; then
+  for p in "${protect_paths[@]}"; do validate_protect_value path "$p"; done
+fi
+if [ ${#protect_globs[@]} -gt 0 ]; then
+  for p in "${protect_globs[@]}"; do validate_protect_value glob "$p"; done
+fi
+
+round_label="initial"
+[ -n "$fix_round" ] && round_label="fix-$fix_round"
+
+# --- protected set (fixed floor ∪ validated extensions — G2/A8/A9) -------------
+
+protected_pathspecs() {
+  # "Anywhere" categories as :(glob,top)**/pattern; root-anchored trees and
+  # bare-glob configs as :(glob,top); exact files as :(literal,top). One
+  # pathspec per line; floor entries contain no whitespace.
+  cat <<'FLOOR'
+:(glob,top)tests/**
+:(glob,top)test/**
+:(glob,top)**/test_*.py
+:(glob,top)**/*_test.py
+:(glob,top)**/*.test.*
+:(glob,top)**/*.spec.*
+:(glob,top)**/conftest.py
+:(glob,top)**/*_test.go
+:(glob,top)**/src/test/**
+:(glob,top)**/jest.config.*
+:(glob,top)**/vitest.config.*
+:(glob,top)**/playwright.config.*
+:(glob,top)**/.gitignore
+:(glob,top)**/.gitattributes
+:(glob,top).github/workflows/**
+:(glob,top)build.gradle*
+:(glob,top)settings.gradle*
+:(literal,top)pytest.ini
+:(literal,top)tox.ini
+:(literal,top)noxfile.py
+:(literal,top)setup.cfg
+:(literal,top)pyproject.toml
+:(literal,top)package.json
+:(literal,top)package-lock.json
+:(literal,top).pre-commit-config.yaml
+:(literal,top)Makefile
+:(literal,top)justfile
+:(literal,top).gitattributes
+:(literal,top).gitignore
+:(literal,top).gitmodules
+:(literal,top)go.mod
+:(literal,top)go.sum
+:(literal,top)Cargo.toml
+:(literal,top)Cargo.lock
+:(literal,top)pom.xml
+FLOOR
+  local p
+  if [ ${#protect_paths[@]} -gt 0 ]; then
+    for p in "${protect_paths[@]}"; do printf ':(literal,top)%s\n' "$p"; done
+  fi
+  if [ ${#protect_globs[@]} -gt 0 ]; then
+    for p in "${protect_globs[@]}"; do printf ':(glob,top)%s\n' "$p"; done
+  fi
+}
+
+build_pathspec_array() { # fills PATHSPECS (bash-3.2: while-read, no mapfile)
+  PATHSPECS=()
+  local line
+  while IFS= read -r line; do
+    [ -n "$line" ] && PATHSPECS+=("$line")
+  done < <(protected_pathspecs)
+}
+
+# --- preflight: worktree, branch, cleanliness (A4/A5) --------------------------
+
+[[ "$worktree" = /* ]] || fail_preflight "--worktree must be an absolute path (got: $worktree)"
+[ -d "$worktree" ] || fail_preflight "worktree does not exist: $worktree"
+
+repo_root=$(git_safe -C "$worktree" rev-parse --show-toplevel 2>/dev/null) \
+  || fail_preflight "not a git worktree: $worktree"
+worktree_real=$(cd "$worktree" && pwd -P)
+[ "$repo_root" = "$worktree_real" ] \
+  || fail_preflight "worktree is not the repository root (got $worktree_real, root is $repo_root)"
+
+# Named branch required — detached HEAD refused (A5)
+if ! captured_ref=$(git_safe -C "$worktree" symbolic-ref -q HEAD); then captured_ref=""; fi
+[ -n "$captured_ref" ] || fail_preflight "detached HEAD — the lane requires a named branch (A5)"
+[ "$captured_ref" = "refs/heads/$branch" ] \
+  || fail_preflight "worktree is on '$captured_ref', expected 'refs/heads/$branch'"
+
+if ! captured_head=$(git_safe -C "$worktree" rev-parse HEAD 2>/dev/null); then
+  fail_preflight "worktree has no commits on '$branch' (unborn branch) — the lane needs a base commit"
+fi
+
+# Clean worktree required (A1 removed the staged-dirty exception)
+porcelain_now=$(git_safe -C "$worktree" status --porcelain --ignore-submodules=none)
+[ -z "$porcelain_now" ] || fail_preflight "worktree not clean at dispatch:
+$porcelain_now"
+
+# Ignore/attribute files cannot hide behind ignore rules (floor-bypass class):
+# refuse at dispatch if any untracked .gitignore/.gitattributes exists anywhere
+# (vendored/ignored trees included) — dispatch from a pristine checkout (A12).
+veiled_pre=$(git_safe -C "$worktree" ls-files --others -- ':(glob,top)**/.gitignore' ':(glob,top)**/.gitattributes')
+[ -z "$veiled_pre" ] || fail_preflight "untracked ignore/attribute files present at dispatch (would veil the protection floor):
+$veiled_pre"
+
+captured_index=$(git_safe -C "$worktree" ls-files -s | shasum -a 256 | awk '{print $1}')
+
+git_dir=$(git_safe -C "$worktree" rev-parse --path-format=absolute --git-dir) \
+  || fail_preflight "could not resolve the worktree's git dir"
+git_common_dir=$(git_safe -C "$worktree" rev-parse --path-format=absolute --git-common-dir) \
+  || fail_preflight "could not resolve the worktree's git common dir"
+
+# --- preflight: codex CLI + auth lane (A15 — nonfatal parses, no head) ----------
+
+command -v codex >/dev/null 2>&1 || fail_preflight "codex CLI is not on PATH"
+if ! codex_version=$(codex --version 2>/dev/null | grep -m1 -Eo '[0-9]+\.[0-9]+\.[0-9]+'); then
+  codex_version=""
+fi
+[ -n "$codex_version" ] || fail_preflight "could not parse 'codex --version' output"
+version_at_least "$codex_version" "$MIN_CODEX_CLI_VERSION" \
+  || fail_preflight "codex CLI $codex_version is older than required $MIN_CODEX_CLI_VERSION"
+
+auth_file="${CODEX_HOME:-$HOME/.codex}/auth.json"
+[ -f "$auth_file" ] || fail_preflight "no auth.json at $auth_file (is codex logged in?)"
+# Extract only auth_mode; never read the rest of the file into any log.
+if ! auth_mode=$(grep -m1 -Eo '"auth_mode"[[:space:]]*:[[:space:]]*"[^"]*"' "$auth_file" \
+  | sed -E 's/.*:[[:space:]]*"([^"]*)"/\1/'); then
+  auth_mode=""
+fi
+[ -n "$auth_mode" ] || fail_preflight "auth.json carries no auth_mode: $auth_file"
+[ "$auth_mode" = "$billing_lane" ] \
+  || fail_preflight "auth_mode '$auth_mode' does not match the chosen billing lane '$billing_lane' — fix codex login or pass --billing-lane deliberately"
+
+# --- preflight: lane workspace + state file (A2/A19) ----------------------------
+
+repo_key=$(printf '%s' "$git_common_dir" | shasum -a 256 | awk '{print substr($1, 1, 16)}')
+branch_key=$(printf '%s' "$branch" | tr '/' '_')
+workspace="$WORKSPACE_ROOT/$repo_key/$branch_key"
+mkdir -p "$workspace" || fail_preflight "could not create the lane workspace: $workspace"
+
+state_file="$workspace/state"
+state_get() { # state_get KEY — empty when missing (nonfatal parse)
+  local line
+  if ! line=$(grep -m1 -E "^$1=" "$state_file" 2>/dev/null); then line=""; fi
+  printf '%s' "${line#"$1"=}"
+}
+
+[ -f "$state_file" ] \
+  || fail_preflight "no lane state file at $state_file — the controller writes it before the RED commit (codex-lane.md step 0)"
+state_branch=$(state_get branch)
+[ "$state_branch" = "$branch" ] \
+  || fail_preflight "state file is for branch '$state_branch', not '$branch' — one lane per repo+branch (A19)"
+escalated=$(state_get escalated)
+[ "$escalated" != "true" ] \
+  || fail_preflight "lane is escalated — fresh Sol dispatch forbidden (A18 latch)"
+state_base=$(state_get base_sha)
+[ -n "$state_base" ] || fail_preflight "state file carries no base_sha"
+
+# base derived from HEAD and cross-checked against state (spec §5 CLI contract)
+if [ -n "$fix_round" ]; then
+  base=$state_base
+  git_safe -C "$worktree" cat-file -e "${base}^{commit}" 2>/dev/null \
+    || fail_preflight "state base_sha is not a commit here: $base"
+  if ! head_parent=$(git_safe -C "$worktree" rev-list --parents -n1 HEAD | awk '{print $2}'); then
+    head_parent=""
+  fi
+  [ "$head_parent" = "$base" ] \
+    || fail_preflight "fix round $fix_round: HEAD's sole parent must be base $base (got: ${head_parent:-none}) — HEAD must be Sol's implementation commit"
+else
+  base=$captured_head
+  [ "$base" = "$state_base" ] \
+    || fail_preflight "HEAD $base != state base_sha $state_base — re-freeze base in state before dispatching"
+fi
+
+# --- preflight: one dispatch at a time (A13(3)/A19(6) — group-empty reclaim) ----
+
+# The lock records the adapter's PID at acquire and the CODEX group's PGID
+# after launch. Staleness is judged on those two — never on this adapter's
+# own PGID, which it shares with whatever long-lived shell/harness spawned
+# it (keying on that would make a dead lane's lock unreclaimable forever,
+# and group-killing it would kill the spawner).
+lock_dir="$git_dir/tdd-dispatch.lock"
+if mkdir "$lock_dir" 2>/dev/null; then
+  printf '%s\n' "$$" >"$lock_dir/pid"
+else
+  holder_pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+  holder_pgid=$(cat "$lock_dir/pgid" 2>/dev/null || true)
+  if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+    fail_preflight "another TDD dispatch (pid $holder_pid) is live for this repo — one lane at a time"
+  fi
+  if [ -n "$holder_pgid" ] && kill -0 -- "-$holder_pgid" 2>/dev/null; then
+    fail_preflight "a dead dispatch left its codex process group ($holder_pgid) running — one lane at a time; kill that group, then retry"
+  fi
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir" 2>/dev/null || fail_preflight "could not reclaim the stale dispatch lock: $lock_dir"
+  printf '%s\n' "$$" >"$lock_dir/pid"
+fi
+trap 'rm -rf "$lock_dir"' EXIT
+
+# --- dispatch bookkeeping -------------------------------------------------------
+
+dispatch_id="tdd-$(date +%s)-$$"
+dispatch_epoch=$(date +%s)
+brief_file="$workspace/brief-$round_label-$dispatch_id.md"
+reply_file="$workspace/reply-$round_label-$dispatch_id.md"
+exec_log="$workspace/exec-$round_label-$dispatch_id.log"
+result_file="$workspace/result-$dispatch_id"
+
+cat >"$brief_file"
+[ -s "$brief_file" ] || fail_preflight "empty brief on stdin"
+
+write_result_record() { # write_result_record STATUS [extra lines...] — atomic (A20)
+  local status=$1
+  shift
+  local tmp="$result_file.tmp.$$"
+  {
+    printf 'TDD-DISPATCH-RESULT\n'
+    printf 'status: %s\n' "$status"
+    printf 'dispatch: %s\n' "$dispatch_id"
+    printf 'model: %s\n' "$LANE_MODEL"
+    printf 'effort: %s\n' "$effort"
+    printf 'round: %s\n' "$round_label"
+    printf 'base: %s\n' "$base"
+    printf 'reply: %s\n' "$reply_file"
+    local line
+    for line in "$@"; do printf '%s\n' "$line"; done
+  } >"$tmp"
+  mv "$tmp" "$result_file"
+  cat "$result_file"
+}
+
+# A4: on every non-DONE exit, repo state must be byte-equal to dispatch capture
+assert_state_preserved() { # assert_state_preserved CONTEXT
+  local ctx=$1 now_head now_ref now_index now_porc
+  now_head=$(git_safe -C "$worktree" rev-parse HEAD)
+  if ! now_ref=$(git_safe -C "$worktree" symbolic-ref -q HEAD); then now_ref=""; fi
+  now_index=$(git_safe -C "$worktree" ls-files -s | shasum -a 256 | awk '{print $1}')
+  now_porc=$(git_safe -C "$worktree" status --porcelain --ignore-submodules=none)
+  [ "$now_head" = "$captured_head" ] || fail_postcondition "$ctx: HEAD moved ($captured_head -> $now_head)"
+  [ "$now_ref" = "$captured_ref" ] || fail_postcondition "$ctx: symbolic ref changed ('$captured_ref' -> '$now_ref')"
+  [ "$now_index" = "$captured_index" ] || fail_postcondition "$ctx: index differs from dispatch capture"
+  [ -z "$now_porc" ] || fail_postcondition "$ctx: worktree differs from dispatch capture:
+$now_porc"
+}
+
+# --- survivable dispatch (A13/A20) ----------------------------------------------
+
+# The 600s progress-freshness hook is session tooling, not lane tooling (F08)
+export CODEX_PROGRESS_HOOK_ENABLED=false
+
+codex_pid=""
+kill_codex_group() {
+  if [ -n "$codex_pid" ] && kill -0 "$codex_pid" 2>/dev/null; then
+    kill -TERM -- "-$codex_pid" 2>/dev/null || true
+    sleep 2
+    kill -KILL -- "-$codex_pid" 2>/dev/null || true
+    wait "$codex_pid" 2>/dev/null || true
+  fi
+}
+on_signal() { # idempotent INT/TERM handler: kill group, atomic CANCELLED record, exit 3
+  trap - INT TERM
+  kill_codex_group
+  write_result_record "CANCELLED" "reason: ${cancel_reason:-signal received}" "log: $exec_log" \
+    >/dev/null 2>&1 || true
+  rm -rf "$lock_dir"
+  trap - EXIT
+  exit 3
+}
+cancel_reason=""
+trap 'cancel_reason="interrupted (INT)"; on_signal' INT
+trap 'cancel_reason="terminated (TERM)"; on_signal' TERM
+
+# Own process group so the watchdog can kill the whole tree (A13(2)).
+# macOS has no setsid(1); bash job control (`set -m`) gives the background
+# job its own PGID == its PID. A shared-PGID port would self-kill this
+# adapter — the SIGTERM fixture catches that misimplementation.
+set -m
+codex exec \
+  -C "$worktree" \
+  -s workspace-write \
+  -m "$LANE_MODEL" \
+  -c "model_reasoning_effort=\"$effort\"" \
+  -c "sandbox_workspace_write.network_access=true" \
+  --output-last-message "$reply_file" \
+  --color never \
+  - <"$brief_file" >"$exec_log" 2>&1 &
+codex_pid=$!
+set +m
+printf '%s\n' "$codex_pid" >"$lock_dir/pgid" # codex group leader (set -m: PGID == PID)
+
+deadline=$((dispatch_epoch + timeout_seconds))
+while kill -0 "$codex_pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep "$WATCHDOG_POLL_SECONDS"
+done
+
+if kill -0 "$codex_pid" 2>/dev/null; then
+  kill_codex_group
+  write_result_record "CANCELLED" \
+    "reason: wall-clock cap of ${timeout_seconds}s exceeded — codex process group killed" \
+    "log: $exec_log"
+  exit 3
+fi
+
+codex_exit=0
+wait "$codex_pid" || codex_exit=$?
+if [ "$codex_exit" -ne 0 ]; then
+  write_result_record "CANCELLED" "reason: codex exec exited $codex_exit" "log: $exec_log"
+  exit 3
+fi
+trap - INT TERM
+
+# --- anchored result parse (A14(5)) ---------------------------------------------
+
+[ -s "$reply_file" ] \
+  || fail_postcondition "codex exec finished but wrote no final message (log: $exec_log)"
+
+header_count=$(grep -cx 'TDD-DISPATCH-RESULT' "$reply_file" || true)
+if [ "$header_count" -ne 1 ]; then
+  assert_state_preserved "malformed result ($header_count TDD-DISPATCH-RESULT headers)"
+  write_result_record "MALFORMED" \
+    "reason: expected exactly one TDD-DISPATCH-RESULT header, found $header_count"
+  exit 0
+fi
+if ! sol_status=$(awk '/^TDD-DISPATCH-RESULT$/ {
+    if ((getline nextline) <= 0) exit 1
+    if (nextline ~ /^status: (DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_CONTEXT|TEST_CONTESTED|PROTECTED_CHANGE_REQUESTED)$/) {
+      sub(/^status: /, "", nextline); print nextline; exit 0
+    }
+    exit 1
+  }' "$reply_file"); then
+  sol_status=""
+fi
+if [ -z "$sol_status" ]; then
+  assert_state_preserved "malformed result (no valid status: line after the header)"
+  write_result_record "MALFORMED" \
+    "reason: the line after TDD-DISPATCH-RESULT is not a valid status: line"
+  exit 0
+fi
+
+# --- route by status -------------------------------------------------------------
+
+run_format_cmds() { # controller-supplied mechanical discharge (meta-#9 principle)
+  local cmd
+  [ ${#format_cmds[@]} -gt 0 ] || return 0
+  for cmd in "${format_cmds[@]}"; do
+    (cd "$worktree" && bash -c "$cmd") >>"$exec_log" 2>&1 \
+      || fail_postcondition "format command failed: $cmd (log: $exec_log)"
+  done
+}
+
+fail_early_protected_check() { # G2's worktree twin — tracked AND untracked (§3 step 7)
+  build_pathspec_array
+  local tracked untracked veiled
+  tracked=$(git_safe -C "$worktree" diff --no-ext-diff --name-only "$base" -- "${PATHSPECS[@]}")
+  untracked=$(git_safe -C "$worktree" ls-files --others --exclude-standard -- "${PATHSPECS[@]}")
+  # Ignore rules cannot veil the ignore files themselves: a nested untracked
+  # .gitignore could self-ignore and smuggle ignored payloads past every
+  # later scan, so this one scan deliberately drops --exclude-standard.
+  veiled=$(git_safe -C "$worktree" ls-files --others -- ':(glob,top)**/.gitignore' ':(glob,top)**/.gitattributes')
+  [ -z "$tracked" ] && [ -z "$untracked" ] && [ -z "$veiled" ] \
+    || fail_postcondition "protected paths changed in the worktree:
+${tracked:+$tracked
+}${untracked:+$untracked
+}${veiled}"
+}
+
+check_reply_evidence() { # advisory-refusal tier (§3 step 8) — judged BEFORE the
+  # trusted commit lands, so a DONE with no test evidence leaves the repo at base
+  grep -Eqi '(pytest|unittest|npm (test|run)|pnpm (test|run)|yarn (test|run)|go test|cargo (test|nextest)|jest|vitest|mocha|rspec|mix test|dotnet test|make (test|check)|tox|bats|\btests?\b)' "$reply_file" \
+    || fail_postcondition "reply names no test command: $reply_file"
+  grep -Eqi '([0-9]+[[:space:]]*/[[:space:]]*[0-9]+|[0-9]+ (passing|passed|pass)|all tests? pass|passing|passed|\bPASS\b|\bok\b|\bgreen\b|\bfail(ed|ing)?\b)' "$reply_file" \
+    || fail_postcondition "reply shows no test result output: $reply_file"
+}
+
+make_trusted_commit() { # #16 structural: the adapter is the trusted committer
+  pre_commit_head=$(git_safe -C "$worktree" rev-parse HEAD)
+  if [ "$pre_commit_head" != "$captured_head" ]; then
+    if [ -n "$fix_round" ]; then
+      fail_postcondition "HEAD $pre_commit_head is not dispatch capture $captured_head before trusted amend"
+    else
+      fail_postcondition "HEAD $pre_commit_head is not base $base before trusted commit"
+    fi
+  fi
+  git_safe -C "$worktree" add -A
+  local msg_file="$workspace/commit-msg-$dispatch_id"
+  {
+    printf '%s\n' "$commit_subject"
+    printf '\n'
+    printf '%s\n' "$IMPLEMENTER_TRAILER"
+  } >"$msg_file"
+  if [ -n "$fix_round" ]; then
+    git_safe -C "$worktree" commit --amend --file "$msg_file" --quiet \
+      || fail_postcondition "trusted amend failed (fix round $fix_round)"
+  else
+    git_safe -C "$worktree" commit --file "$msg_file" --quiet \
+      || fail_postcondition "trusted commit failed (empty diff? Sol reported DONE with no changes)"
+  fi
+}
+
+run_done_postconditions() { # §3 step 8 — every check fail-closed
+  local ref_now head_sha parents parent_count parent_sha porc g2 flagged trailers agent_count agent_line
+  if ! ref_now=$(git_safe -C "$worktree" symbolic-ref -q HEAD); then ref_now=""; fi
+  [ -n "$ref_now" ] || fail_postcondition "HEAD detached after trusted commit"
+  [ "$ref_now" = "$captured_ref" ] \
+    || fail_postcondition "symbolic ref changed ('$captured_ref' -> '$ref_now')"
+  head_sha=$(git_safe -C "$worktree" rev-parse HEAD)
+  # Exactly one parent == base — via parent-count, never first-parent
+  # shorthand (A5: a merge would smuggle a second history through it)
+  parents=$(git_safe -C "$worktree" rev-list --parents -n1 HEAD)
+  parent_count=$(($(printf '%s' "$parents" | wc -w) - 1))
+  [ "$parent_count" -eq 1 ] \
+    || fail_postcondition "implementation commit has $parent_count parents (need exactly 1)"
+  parent_sha=$(printf '%s' "$parents" | awk '{print $2}')
+  [ "$parent_sha" = "$base" ] \
+    || fail_postcondition "implementation commit's parent is $parent_sha, not base $base"
+  if [ -n "$fix_round" ]; then
+    [ "$head_sha" != "$pre_commit_head" ] \
+      || fail_postcondition "fix round $fix_round: commit SHA unchanged (amend produced nothing)"
+  fi
+  porc=$(git_safe -C "$worktree" status --porcelain --ignore-submodules=none)
+  [ -z "$porc" ] || fail_postcondition "tree not clean after trusted commit:
+$porc"
+  build_pathspec_array
+  g2=$(git_safe -C "$worktree" diff --no-ext-diff --name-only "$base..HEAD" -- "${PATHSPECS[@]}")
+  [ -z "$g2" ] || fail_postcondition "G2: protected paths changed in $base..HEAD:
+$g2"
+  flagged=$(git_safe -C "$worktree" ls-files -v | grep -E '^([a-z]|S) ' || true)
+  [ -z "$flagged" ] || fail_postcondition "assume-unchanged/skip-worktree index flags present (A12):
+$flagged"
+  # Trailer exact-once via git-trailer parsing, never body greps (#17 residue 3)
+  trailers=$(git_safe -C "$worktree" show -s --format=%B HEAD | git_safe interpret-trailers --parse 2>/dev/null || true)
+  agent_count=$(printf '%s\n' "$trailers" | grep -c '^Agent: ' || true)
+  [ "$agent_count" -eq 1 ] \
+    || fail_postcondition "expected exactly one Agent trailer, found $agent_count"
+  agent_line=$(printf '%s\n' "$trailers" | grep -m1 '^Agent: ' || true)
+  [ "$agent_line" = "$IMPLEMENTER_TRAILER" ] \
+    || fail_postcondition "Agent trailer is '$agent_line', expected '$IMPLEMENTER_TRAILER'"
+}
+
+persist_g4_artifacts() { # A17(2): prebuilt diff + changed-file list for the reviewer
+  # --text: a committed .gitattributes marking paths -diff must not binary-stub
+  # the artifact (attribute changes are floor-refused; this is belt and braces)
+  git_safe -C "$worktree" diff --no-ext-diff --text "$base..HEAD" >"$workspace/g4-diff-$dispatch_id.patch"
+  git_safe -C "$worktree" diff --no-ext-diff --name-only "$base..HEAD" >"$workspace/g4-changed-files-$dispatch_id.txt"
+}
+
+case "$sol_status" in
+  DONE | DONE_WITH_CONCERNS)
+    run_format_cmds
+    fail_early_protected_check
+    check_reply_evidence
+    make_trusted_commit
+    run_done_postconditions
+    persist_g4_artifacts
+    write_result_record "$sol_status" \
+      "commit: $(git_safe -C "$worktree" rev-parse HEAD)" \
+      "g4-diff: $workspace/g4-diff-$dispatch_id.patch" \
+      "g4-changed-files: $workspace/g4-changed-files-$dispatch_id.txt"
+    exit 0
+    ;;
+  BLOCKED | NEEDS_CONTEXT | TEST_CONTESTED | PROTECTED_CHANGE_REQUESTED)
+    assert_state_preserved "non-DONE status $sol_status"
+    write_result_record "$sol_status" "commit: none"
+    exit 0
+    ;;
+esac
+
+fail_postcondition "unreachable status routing for '$sol_status'"

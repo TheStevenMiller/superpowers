@@ -46,6 +46,19 @@ Implement fresh from tests. Period.
 
 ## Red-Green-Refactor
 
+**Codex lane ([local]) — check before entering the loop:** on the Claude
+Code harness, in a top-level session (not a subagent), for a task in a git
+repository ⇒ do not run the loop below one test at a time. Follow
+[references/codex-lane.md](references/codex-lane.md) for the full cycle —
+author the complete suite up front using this skill's test-writing
+guidance → RED commit (which becomes `base`) → dispatch implementation to
+GPT-5.6 Sol via `<plugin-root>/scripts/tdd-codex-dispatch` (`<plugin-root>`
+is two levels up from this skill's announced base directory; never a
+target-repo-relative path) → native GREEN → adversarial review → finalize —
+then return here only to close out. Subagents, other harnesses, and
+non-git tasks: use the native loop below unchanged. First-entry subagent
+suppression is behaviorally evaluated but advisory.
+
 ```dot
 digraph tdd_cycle {
     rankdir=LR;
