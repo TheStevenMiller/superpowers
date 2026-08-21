@@ -202,21 +202,25 @@ effort, not the model:
 The final whole-branch review is one of these — dispatch it on the most
 capable available model, not the session default.
 
-**Review tasks**: `fable`, always — a static pin, never scaled down by the
-diff's size or apparent simplicity ([local] Fable review routing; keep the
-pin in step with the `CLAUDE_CODE_SUBAGENT_MODEL` env pin — they move
-together). Scoped re-reviews of fix diffs stay `fable` too: the re-review is
-the gate on the fix, and when implementer lanes run on a different engine,
-cross-model judgment is the point — don't drop the tier for a small diff.
+**Review tasks**: inherit the session's model — OMIT `model` when dispatching
+a reviewer ([local] session-model review routing). The reviewer runs on
+whatever rung the session runs on, so it is never scaled down by the diff's
+size or apparent simplicity, and a session on a more capable model gets more
+capable reviews for free. Scoped re-reviews of fix diffs inherit too: the
+re-review is the gate on the fix, and when implementer lanes run on a
+different engine, cross-model judgment is the point — don't drop the tier for
+a small diff.
 
 **Fix-loop escalation (rounds 4-5)**: dispatch a fresh NATIVE implementer
 via the Agent tool on the most capable available model ([local] Sol
 implementer lanes — the escalation rung deliberately changes engine; it is
 the same rung BLOCKED re-dispatch uses).
 
-**Always specify the model explicitly when dispatching a subagent.** An
-omitted model inherits your session's model — often the most capable and
-most expensive — which silently defeats this section.
+**Specify the model explicitly for every dispatch EXCEPT the review lanes.**
+An omitted model inherits your session's model — often the most capable and
+most expensive — so omission is a deliberate choice, correct only where this
+section says to inherit ([local] review lanes). Anywhere else, name the model
+or you silently defeat this section.
 
 **Turn count beats token price.** Wall-clock and context cost scale with how
 many turns a subagent takes, and low-effort runs routinely take 2-3× the
