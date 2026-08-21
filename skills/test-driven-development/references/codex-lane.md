@@ -24,9 +24,15 @@ Every lane task ends as exactly TWO commits:
    ```
    test: <what the suite specifies>
 
-   Tests-authored-by: Claude (Fable 5)
-   Agent: test-author (Claude Fable 5)
+   Tests-authored-by: Claude (<session model>)
+   Agent: test-author (Claude <session model>)
    ```
+
+   `<session model>` is the model YOU are running as — `Opus 5`, `Fable 5`,
+   whatever this session is — never a fixed name. The trailer is provenance,
+   and the lane is entered from whatever rung the session is on, so a
+   hardcoded model would attribute the suite to a model that did not write
+   it. The commit-msg hook accepts any `Agent: <role> (<model>)`.
 
 2. **Implementation commit — exactly one parent, equal to `base`,** created
    by the adapter from Sol's worktree changes with your `--commit-subject`
@@ -34,9 +40,10 @@ Every lane task ends as exactly TWO commits:
    commit; upheld contests/protected changes rebuild it on a re-frozen base.
 
 There is never a third commit. Escalation provenance: amend Sol's commit to
-`Agent: implementer (GPT 5.6 Sol; escalated: Claude Fable 5)`, or — when you
-discard Sol's work — a fresh commit on `base` with
-`Agent: implementer (Claude Fable 5)`.
+`Agent: implementer (GPT 5.6 Sol; escalated: Claude <session model>)`, or —
+when you discard Sol's work — a fresh commit on `base` with
+`Agent: implementer (Claude <session model>)`. Sol's own trailer stays fixed:
+the implementer engine is the lane's premise, not a session variable.
 
 ## Lane workspace + state file
 
@@ -209,9 +216,9 @@ Manual recovery (operator command, after human review):
    fresh disposable checkout (NO repository writes), max 2 probe rounds per
    lane, then fresh recheck dispatch with the output as payload.
 9. **G5 adjudication (you own the verdicts).**
-   - TEST_CONTESTED upheld: fix the test on the Fable-owned base lineage —
-     amend the RED commit (or replace it with a Fable commit IN ITS PLACE —
-     never an additional commit), re-run format-then-RED, re-freeze
+   - TEST_CONTESTED upheld: fix the test on the test-author-owned base
+     lineage — amend the RED commit (or replace it with your own commit IN
+     ITS PLACE — never an additional commit), re-run format-then-RED, re-freeze
      `base_sha` in state, dispatch fresh initial-style. No round consumed.
    - PROTECTED_CHANGE_REQUESTED upheld: apply the change yourself on the
      base lineage, re-verify RED, re-freeze, dispatch fresh — free. If Sol's
@@ -265,14 +272,14 @@ dispatch (a 4th fix round is unreachable).
 ## Escalation (inline, non-routing — you implement)
 
 Set `escalated=true` in state FIRST. Then implement directly in the existing
-worktree on the Fable-owned base lineage — implementation + verification
+worktree on the test-author-owned base lineage — implementation + verification
 only; no re-classification, no routing decision, no adapter. Run the
 IDENTICAL gates: commit everything; porcelain-clean assert; disposable-
 checkout GREEN; G2 range diff (`git diff --name-only base..HEAD -- <the
 protected pathspecs>` must be empty — run it with the four `GIT_*_PATHSPECS`
 vars unset and `GIT_NO_REPLACE_OBJECTS=1`); G4 review via the pinned agent.
 Provenance: amend Sol's commit with the co-implementation trailer, or a
-fresh commit on `base` with the pure-Fable trailer (§topology). The final
+fresh commit on `base` with the native-implementer trailer (§topology). The final
 summary records the escalation and its trigger.
 
 ## Brief template (§7 — the complete Sol contract)

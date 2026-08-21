@@ -33,10 +33,13 @@ EOF
 # disables it; the fixture .gitignore keeps bytecode out of the protected scans.
 printf '__pycache__/\n*.pyc\n' >"$REPO/.gitignore"
 git -C "$REPO" -c core.hooksPath=/dev/null add -A
+# Fixture trailer: a literal stand-in for the session model a real lane run
+# fills in (the adapter never parses the test-author trailer; the commit-msg
+# hook accepts any `Agent: <role> (<model>)`).
 git -C "$REPO" -c core.hooksPath=/dev/null commit -qm 'test: slugify spec
 
-Tests-authored-by: Claude (Fable 5)
-Agent: test-author (Claude Fable 5)'
+Tests-authored-by: Claude (smoke fixture)
+Agent: test-author (smoke fixture)'
 BASE=$(git -C "$REPO" rev-parse HEAD)
 
 ADAPTER="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/tdd-codex-dispatch"

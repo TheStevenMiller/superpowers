@@ -52,8 +52,14 @@ grep -q 'top-level session (not a subagent)' "$tdd/SKILL.md"
 test -f "$tdd/references/codex-lane.md"
 grep -q 'exactly one parent, equal to `base`' "$tdd/references/codex-lane.md"
 grep -q 'Transition table' "$tdd/references/codex-lane.md"
-grep -qF 'Agent: implementer (GPT 5.6 Sol; escalated: Claude Fable 5)' "$tdd/references/codex-lane.md"
-grep -qF 'Tests-authored-by: Claude (Fable 5)' "$tdd/references/codex-lane.md"
+# Trailer grammar: the Claude-side model is the SESSION's, never a fixed
+# name (Sol's implementer trailer stays literal — the engine is the premise).
+# Negative half: any re-pinned Fable spelling must fail the sync.
+grep -qF 'Agent: implementer (GPT 5.6 Sol; escalated: Claude <session model>)' "$tdd/references/codex-lane.md"
+grep -qF 'Tests-authored-by: Claude (<session model>)' "$tdd/references/codex-lane.md"
+grep -qF 'Agent: test-author (Claude <session model>)' "$tdd/references/codex-lane.md"
+grep -qF 'Agent: implementer (GPT 5.6 Sol)' "$tdd/references/codex-lane.md"
+! grep -qE 'Claude Fable 5|Claude \(Fable 5\)|pure-Fable|Fable-owned' "$tdd/references/codex-lane.md"
 grep -q 'escalated=true' "$tdd/references/codex-lane.md"
 grep -q 'Manual recovery' "$tdd/references/codex-lane.md"
 

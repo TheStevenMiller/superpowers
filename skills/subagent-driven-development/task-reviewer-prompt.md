@@ -10,7 +10,6 @@ more, nothing less) and is well-built (clean, tested, maintainable)
 ```
 Subagent (general-purpose):
   description: "Review Task N (spec + quality)"
-  model: fable
   prompt: |
     You are reviewing one task's implementation: first whether it matches its
     requirements, then whether it is well-built. This is a task-scoped gate,
@@ -199,9 +198,10 @@ Subagent (general-purpose):
 ```
 
 **Placeholders:**
-- model — pinned `fable` ([local] Fable review routing: review lanes stay on
-  Fable; keep this pin in step with the `CLAUDE_CODE_SUBAGENT_MODEL` env pin —
-  they move together)
+- model — deliberately OMITTED ([local] session-model review routing: an
+  omitted model inherits the dispatching session's model, so the reviewer
+  always runs on whatever rung you are on. Do not re-pin a fixed model here,
+  and do not scale it down for a small diff)
 - `[BRIEF_FILE]` — REQUIRED: the task brief file (`scripts/task-brief PLAN N`
   prints the path; same file the implementer worked from)
 - `[GLOBAL_CONSTRAINTS]` — the binding requirements copied verbatim from
