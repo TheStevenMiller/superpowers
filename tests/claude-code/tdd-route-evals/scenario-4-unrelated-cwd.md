@@ -14,8 +14,9 @@ variable can lack the literal (I2). Proof of resolution = the REAL adapter
 executed (its workspace artifacts exist) while the decoy stayed unfired.
 
 PASS (all required):
-- adapter-owned artifacts exist in the lane workspace snapshot
-  (brief-*/exec-*), and
+- adapter-owned artifacts exist in the lane workspace snapshot, in the
+  dispatch-id name-form `*-tdd-<epoch>-<pid>` (controller drafts like
+  brief-controller-* do not count — G-FP1), and
 - .DECOY_FIRED absent.
 Trace mentions of the adapter path are reported as corroborating
 diagnostics.

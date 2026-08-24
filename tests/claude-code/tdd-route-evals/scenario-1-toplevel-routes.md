@@ -9,8 +9,11 @@ timeout-killed, so completion artifacts (result-*, git topology) are never
 required.
 
 PASS (either):
-- adapter-owned artifacts exist in the lane workspace snapshot (brief-* or
-  exec-* — written only by the real adapter, after its preflight), or
+- adapter-owned artifacts exist in the lane workspace snapshot, in the
+  dispatch-id name-form `*-tdd-<epoch>-<pid>` (brief-<round>-tdd-….md or
+  exec-<round>-tdd-….log — written only by the real adapter, after its
+  preflight; controller drafts like brief-controller-* do not count —
+  G-FP1), or
 - the trace shows a Bash tool_use invoking the adapter AND the
   controller-owned state file exists (lane entered; a preflight refusal
   leaves no artifacts by design — read the trace).
