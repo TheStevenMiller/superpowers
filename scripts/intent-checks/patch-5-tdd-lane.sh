@@ -76,6 +76,30 @@ test -f tests/claude-code/tdd-route-evals/scenario-2-subagent-no-route.md
 test -f tests/claude-code/tdd-route-evals/scenario-3-latch-no-redispatch.md
 test -f tests/claude-code/tdd-route-evals/scenario-4-unrelated-cwd.md
 
+# A26 evidence contract (Task 19): the runner grades from the stream-json
+# tool-call trace + on-disk lane artifacts — never transcript prose. Anchor
+# the operative surface: trace capture, budget bound, env pinning, decoy
+# tripwire, lock-group teardown, contract-formula branch mapping, retention.
+runner=scripts/run-tdd-route-evals.sh
+grep -qF -- '--output-format stream-json --verbose' "$runner"
+grep -qF -- '--max-budget-usd' "$runner"
+grep -qF 'env -u CLAUDE_CODE_OAUTH_TOKEN' "$runner"
+grep -qF '.DECOY_FIRED' "$runner"
+grep -qF 'tdd-dispatch.lock' "$runner"
+grep -qF "tr '/' '_'" "$runner"
+grep -qF 'KEEP="${KEEP:-1}"' "$runner"
+# Hazard: the negatives below quote the RETIRED prose-grader mechanisms —
+# their presence in THIS file is intentional; they must never reappear in
+# the runner (existence guarded by the test -x above, so grep cannot
+# fail-open on a missing file).
+grep -qF "'codex-lane|tdd-codex-dispatch'" "$runner" && exit 1
+grep -qF 'grep -qiE' "$runner" && exit 1
+grep -qF "trap 'rm -rf \"\$WORK\"' EXIT" "$runner" && exit 1
+
+# The grader itself has a deterministic seam (A26/I6) — run it (hermetic,
+# canned traces + scratch repos, no claude/codex, <15s)
+bash tests/claude-code/test-route-eval-grader.sh
+
 # The fixture suite is the mechanical tier — run it (A16(2): every sync AND
 # every promote execute the adapter fixtures; ~90s, stubbed codex only)
 bash tests/claude-code/test-tdd-codex-dispatch.sh
