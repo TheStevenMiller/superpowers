@@ -1,0 +1,168 @@
+{
+  "fixture_format": 1,
+  "deployment_status": "unsupported",
+  "evidence_date": "2026-10-08",
+  "records": [
+    {
+      "id": "official-hook-mappings",
+      "provenance": "official-docs",
+      "source": "https://developers.openai.com/codex/hooks.md",
+      "version_binding": "Live documentation; not pinned to installed 0.161.0 or the current hosted runtime",
+      "facts": {
+        "exec_command_matcher": "Bash",
+        "command_field": "tool_input.command",
+        "cwd_meaning": "Session working directory, not established effective per-call workdir",
+        "effective_workdir_shell_login_tty": "not established",
+        "authenticated_human_prompt_origin": "not established",
+        "write_stdin_reruns_pre_tool_use": false
+      },
+      "documented_responses": {
+        "PreToolUse_denial": {
+          "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "Integrity check blocked."
+          }
+        },
+        "UserPromptSubmit_block": {"decision": "block", "reason": "No approval recorded."},
+        "unchanged_permission_flow": {}
+      }
+    },
+    {
+      "id": "installed-cli-package-identity",
+      "provenance": "implementation/schema",
+      "evidence_kind": "Installed package metadata and binary identity; no matching hook implementation/schema was available",
+      "host_version": "0.161.0",
+      "target": "x86_64-unknown-linux-musl",
+      "binary_sha256": "9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c",
+      "package_manifest_sha256": "93fe960db471e1c0ad2ab4aca40699ea47324920452041a1d9b6c4c683e827a4",
+      "identifies_current_hosted_runtime": false,
+      "establishes_hook_delivery_or_effective_context": false,
+      "observed_regular_executable_non_symlink_paths": ["/usr/bin/python3.11", "/usr/bin/bash"]
+    },
+    {
+      "id": "comparative-source-0160",
+      "provenance": "implementation/schema",
+      "host_version": "0.160.0",
+      "source_revision": "a956835d020762cb2b570053af06f643a11c0ecc",
+      "source_relative_path": "../codex-permission-recovery/vendor/codex/codex-rs",
+      "version_binding": "Comparative source only; not bound to installed 0.161.0 or the current hosted runtime",
+      "facts": {
+        "exec_command_tool_input_fields": ["command"],
+        "exec_command_effective_workdir_shell_login_tty_forwarded": false,
+        "user_prompt_authenticated_human_origin_field": false
+      },
+      "source_locations": [
+        "core/src/tools/handlers/unified_exec/exec_command.rs:520",
+        "core/src/hook_runtime.rs:248",
+        "hooks/src/schema.rs:567"
+      ]
+    },
+    {
+      "id": "synthetic-full-context-launch",
+      "provenance": "synthetic",
+      "shape_version": "test-context-v1",
+      "host_version": null,
+      "native_capture": false,
+      "warning": "Authored test example only. Context fields are hypothetical; never recognize this as a production host adapter.",
+      "event": {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "session_id": "synthetic-session",
+        "cwd": "/synthetic-session-directory",
+        "tool_input": {
+          "command": "/usr/bin/python3.11 /synthetic-project/run.py",
+          "workdir": "/synthetic-project",
+          "shell": "/usr/bin/bash",
+          "login": false,
+          "tty": false
+        }
+      }
+    },
+    {
+      "id": "synthetic-approval-prompt",
+      "provenance": "synthetic",
+      "shape_version": "test-context-v1",
+      "host_version": null,
+      "native_capture": false,
+      "warning": "Authored test prompt; no human approval or prompt-origin evidence.",
+      "event": {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "synthetic-session",
+        "turn_id": "synthetic-turn",
+        "cwd": "/synthetic-project",
+        "prompt": "approve-files sha256:0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "synthetic-task-3-checker-protocol",
+      "provenance": "synthetic",
+      "host_version": null,
+      "native_capture": false,
+      "source": "tests/test_hook.py",
+      "warning": "Offline temporary fixtures exercise checker logic, not native hook delivery or authenticated human approval.",
+      "test_only_adapter_seams": {
+        "normalize_invocation": "Patched only in tests and their subprocess bootstrap with synthetic_normalize.",
+        "require_supported_prompt_delivery": "Patched only in tests and their subprocess bootstrap with synthetic_prompt_delivery. Its test_human_delivery field has no production meaning."
+      },
+      "real_components_exercised": [
+        "Registered main stdin/stdout boundary in-process and in subprocess pipes",
+        "Shared literal invocation policy and fresh content hashing",
+        "Temporary preparation, private candidate/receipt store, approval and revocation",
+        "Deadline-bounded flock contention and release checksum verification"
+      ],
+      "production_behavior": {
+        "PreToolUse": "Always denies: effective host context is unsupported.",
+        "exact_approve_or_revoke_prompt": "Always blocks without changing receipts: human delivery is unsupported.",
+        "ordinary_prompt": "Returns the empty object without touching receipts.",
+        "synthetic_enable_switch": "None: no event flag, CLI option or environment switch enables test adapters."
+      },
+      "registered_input_contract": {
+        "events": ["PreToolUse", "UserPromptSubmit"],
+        "max_event_bytes": 1048576,
+        "overflow_probe_bytes": 1,
+        "duplicate_keys": "reject",
+        "input_event_mismatch": "deny using the registered event's response shape",
+        "handled_result": "One compact JSON object on stdout, no stderr, exit zero.",
+        "unknown_or_missing_cli_event": "Startup error outside the registered-input guarantee."
+      },
+      "release_metadata_contract": {
+        "filename": "release-metadata.json",
+        "location": "Beside hook.py, fixed from __file__; no CLI override.",
+        "exact_keys": ["python_path", "hook_path", "prepare_path", "checksums"],
+        "version_identity": "The release directory; no version field.",
+        "checksum_keys": ["policy.py", "manifest.py", "store.py", "prepare.py", "hook.py", "configure.py"],
+        "helper_path_binding": "hook.py and prepare.py in the metadata directory; no symlink path components.",
+        "test_release_files": "Six synthetic temporary modules with real SHA-256 hashes; never executed."
+      },
+      "synthetic_success_responses": {
+        "approved_unchanged_execution": {},
+        "intact_exact_preparation_helper": {},
+        "approve_prompt": {
+          "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "Files approved; execution permission is unchanged."
+          }
+        },
+        "revoke_prompt": {
+          "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": "Files revoked; execution permission is unchanged."
+          }
+        }
+      },
+      "limitations": [
+        "Checks do not execute the protected command, grant execution permission, or establish dependency closure.",
+        "The deadline is cooperative: blocking stdin or filesystem I/O, startup failure and host timeout remain uncovered.",
+        "In supported-delivery test mode, a failure after atomic receipt replacement can block the prompt while leaving the receipt active; a blocked acknowledgment does not prove rollback."
+      ]
+    }
+  ],
+  "native_captures": [],
+  "activation_gates": [
+    "Establish actual host/version and native hook path",
+    "Establish effective per-call workdir, shell, login and TTY including explicit overrides",
+    "Establish human versus automated/child prompt origin and fresh/resumed/replayed delivery",
+    "Separate user authorization for installation, trust and harmless native canaries"
+  ]
+}
